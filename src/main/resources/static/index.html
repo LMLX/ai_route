@@ -48,14 +48,9 @@ button { padding: 7px 10px; border-radius: 6px; border: none; cursor: pointer; f
         <button class="btn-gray" id="btnNfz" onclick="setMode('nfz')">🚫禁飞</button>
     </div>
     <div>
-        <label>因素画笔 人流/风力/天气</label>
-        <div style="display:flex;gap:3px">
-            <input id="fc" type="number" value="5" min="1" max="9" style="flex:1">
-            <input id="fw" type="number" value="5" min="1" max="9" style="flex:1">
-            <input id="fwe" type="number" value="5" min="1" max="9" style="flex:1">
-            <button class="btn-gray" id="btnFactor" onclick="setMode('factor')" style="flex:1">🎨 单格</button>
-            <button class="btn-gray" onclick="applyFactorsAll()" style="flex:1">全部</button>
-        </div>
+        <label>因素清单 <button class="btn-gray" style="padding:2px 6px;font-size:10px" onclick="addFactorRow()">+</button></label>
+        <div id="factorList" style="max-height:120px;overflow-y:auto"></div>
+        <button class="btn-gray" onclick="pickFactorCell()" style="width:100%;margin-top:4px" id="btnPick">🎯 点格子选赋因素</button>
     </div>
     <div>
         <label>航线参数 宽(m)/高(m)</label>
@@ -112,7 +107,9 @@ let startKey = null, endKey = null;
 let midpoints = [];
 let nfzSet = new Set();
 let factorsMap = {};
-let hoveredKey = null; // ← 鼠标悬停高亮
+let hoveredKey = null;
+let factorRows = [];
+let pendingFactorRow = -1;
 
 function idx(i, j, k) { return i + '_' + j + '_' + k; }
 function parseIdx(key) { return key.split('_').map(Number); }
@@ -126,11 +123,13 @@ setMode('start');
 genGrid();
 addRule();
 
+
+
 function setMode(m) {
     mode = m;
-    ['btnStart','btnEnd','btnMid','btnNfz','btnFactor'].forEach(id => $(id).style.background = '');
-    let c = m==='start'?'#22c55e':m==='end'?'#ef4444':m==='mid'?'#f59e0b':m==='factor'?'#8b5cf6':'#ef4444';
-    let b = m==='start'?'btnStart':m==='end'?'btnEnd':m==='mid'?'btnMid':m==='factor'?'btnFactor':'btnNfz';
+    ['btnStart','btnEnd','btnMid','btnNfz'].forEach(id => $(id).style.background = '');
+    let c = m==='start'?'#22c55e':m==='end'?'#ef4444':m==='mid'?'#f59e0b':'#ef4444';
+    let b = m==='start'?'btnStart':m==='end'?'btnEnd':m==='mid'?'btnMid':'btnNfz';
     $(b).style.background = c; $(b).style.color = '#000';
 }
 
@@ -139,6 +138,8 @@ function genGrid() {
     gridH = parseInt($('gridH').value) || 7;
     gridA = parseInt($('gridA').value) || 5;
     startKey = null; endKey = null; midpoints = []; nfzSet = new Set(); factorsMap = {};
+    factorRows = []; pendingFactorRow = -1; $('factorList').innerHTML = '';
+    addFactorRow();
     // Center the grid
     let c = canvasEl();
     c.width = Math.max(800, window.innerWidth - 400);
@@ -164,18 +165,64 @@ function updateInfo(key) {
         `经度:${lon} 纬度:${lat} 高度:${alt}m${factorStr}`;
 }
 
-function getFactorVals() {
-    return {crowd: parseInt($('fc').value)||5, wind: parseInt($('fw').value)||5, weather: parseInt($('fwe').value)||5};
+function addFactorRow(cellKey = '') {
+    let div = document.createElement('div');
+    div.style.cssText = 'display:flex;gap:2px;align-items:center;margin:2px 0;font-size:11px';
+    let idx = factorRows.length;
+    factorRows.push({crowd:5,wind:5,weather:5,cellKey:cellKey});
+    div.innerHTML = `<span style="min-width:50px;color:#94a3b8">${cellKey||'未选'}</span>
+        <input class="fcv" value="5" style="width:28px;padding:2px" onchange="factorRows[${idx}].crowd=+this.value">
+        <input class="fwv" value="5" style="width:28px;padding:2px" onchange="factorRows[${idx}].wind=+this.value">
+        <input class="fwev" value="5" style="width:28px;padding:2px" onchange="factorRows[${idx}].weather=+this.value">
+        <button class="btn-gray" style="padding:0 4px;font-size:10px" onclick="pickCellForRow(${idx})">🎯</button>
+        <button class="btn-danger" style="padding:0 4px;font-size:10px" onclick="removeFactorRow(${idx})">×</button>`;
+    div.id = 'frow_' + idx;
+    $('factorList').appendChild(div);
+    if (!cellKey) pickCellForRow(idx);
 }
 
-function applyFactorsAll() {
-    let f = getFactorVals();
-    for (let i = 0; i < gridW; i++)
-        for (let j = 0; j < gridH; j++)
-            for (let k = 0; k < gridA; k++)
-                factorsMap[idx(i,j,k)] = {...f};
+function pickCellForRow(idx) {
+    pendingFactorRow = idx;
+    $('btnPick').style.background = '#8b5cf6'; $('btnPick').style.color = '#fff';
+    $('btnPick').textContent = '🎯 点击画布上的格子...';
+}
+
+function pickFactorCell() {
+    if (pendingFactorRow < 0) { pickCellForRow(factorRows.length); addFactorRow(); return; }
+}
+
+function rebuildFactorUI() {
+    let rows = [...factorRows]; // 拷贝
+    factorRows = [];
+    $('factorList').innerHTML = '';
+    rows.forEach(r => addFactorRow(r.cellKey)); // addFactorRow 会 push 到 factorRows
+}
+
+function removeFactorRow(idx) {
+    factorRows.splice(idx, 1);
+    rebuildFactorUI();
+    if (pendingFactorRow === idx) pendingFactorRow = -1;
+    refreshFactorMap();
     draw();
 }
+
+function applyFactorToPending(key) {
+    if (pendingFactorRow < 0 || pendingFactorRow >= factorRows.length) return;
+    factorRows[pendingFactorRow].cellKey = key;
+    pendingFactorRow = -1;
+    $('btnPick').style.background = ''; $('btnPick').style.color = '';
+    $('btnPick').textContent = '🎯 点格子选赋因素';
+    rebuildFactorUI();
+    refreshFactorMap();
+    draw();
+}
+
+function refreshFactorMap() {
+    factorsMap = {};
+    factorRows.forEach(r => { if (r.cellKey) factorsMap[r.cellKey] = {crowd:r.crowd, wind:r.wind, weather:r.weather}; });
+}
+
+
 
 function addRule() {
     let div = document.createElement('div');
@@ -224,6 +271,11 @@ function draw() {
         let lit = 0.55 + avg / 9 * 0.45; // 因素高=更亮
         let color = adjustLight(baseColor, lit);
         drawDot(cx, x, y, color, isNfz, k, Math.max(0,gridA-1));
+        // 已设因素的格子打 ✔
+        if (f) {
+            cx.fillStyle = '#fff'; cx.font = 'bold 10px sans-serif'; cx.textAlign = 'center';
+            cx.fillText('✔', x, y + 4);
+        }
     });
 
     // Draw points (S, E, M)
@@ -331,11 +383,11 @@ canvasEl().addEventListener('click', e => {
                 if (d < bestDist && d < maxR) { bestDist = d; best = idx(i,j,k); }
             }
     if (!best) return;
+    if (pendingFactorRow >= 0) { applyFactorToPending(best); draw(); return; }
     if (mode === 'start') { startKey = best; mode='end'; setMode('end'); }
     else if (mode === 'end') { endKey = best; mode='start'; setMode('start'); }
     else if (mode === 'mid') { midpoints.includes(best) ? midpoints = midpoints.filter(m=>m!==best) : midpoints.push(best); }
     else if (mode === 'nfz') { nfzSet.has(best) ? nfzSet.delete(best) : nfzSet.add(best); }
-    else if (mode === 'factor') { factorsMap[best] = getFactorVals(); }
     draw();
 });
 
@@ -377,6 +429,7 @@ function buildNoFly() {
 
 async function runRoute() {
     if (!startKey || !endKey) { alert('请先设置起点和终点'); return; }
+    refreshFactorMap();
     $('result').innerHTML = '<span style="color:#f59e0b">计算中...</span>';
 
     let body = {
