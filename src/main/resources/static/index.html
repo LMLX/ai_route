@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>智能航线规划</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, sans-serif; background: #0f172a; color: #e2e8f0; display: flex; height: 100vh; }
+#sidebar { width: 380px; padding: 14px; overflow-y: auto; background: #1e293b; display: flex; flex-direction: column; gap: 10px; }
+#canvas-wrap { flex: 1; display: flex; align-items: center; justify-content: center; background: #0f172a; position: relative; }
+canvas { border: 1px solid #334155; border-radius: 8px; }
+h2 { font-size: 16px; color: #f8fafc; }
+label { font-size: 12px; color: #94a3b8; margin-bottom: 2px; display: block; }
+input, select { width: 100%; padding: 6px 8px; border-radius: 4px; border: 1px solid #475569; background: #1e293b; color: #e2e8f0; font-size: 12px; }
+button { padding: 7px 10px; border-radius: 6px; border: none; cursor: pointer; font-size: 12px; font-weight: 600; }
+.btn-primary { background: #3b82f6; color: #fff; }
+.btn-primary:hover { background: #2563eb; }
+.btn-danger { background: #ef4444; color: #fff; }
+.btn-gray { background: #475569; color: #e2e8f0; }
+.toolbar { display: flex; gap: 5px; flex-wrap: wrap; }
+.toolbar button { flex: 1; min-width: 65px; font-size: 11px; }
+.rule-row { display: flex; gap: 3px; align-items: center; margin-bottom: 3px; }
+.rule-row input { flex: 1; padding: 4px; font-size: 11px; }
+.legend { font-size: 11px; color: #94a3b8; display: flex; gap: 10px; flex-wrap: wrap; }
+.legend span { display: inline-flex; align-items: center; gap: 4px; }
+.legend .dot { width: 10px; height: 10px; border-radius: 2px; }
+#result { font-size: 12px; color: #94a3b8; max-height: 140px; overflow-y: auto; }
+#result .success { color: #22c55e; }
+#result .fail { color: #ef4444; }
+</style>
+</head>
+<body>
+<div id="sidebar">
+    <h2>🛫 智能航线规划</h2>
+    <div>
+        <label>网格尺寸 (经度×纬度×高度层)</label>
+        <div style="display:flex;gap:4px">
+            <input id="gridW" type="number" value="7" min="3" max="20" style="flex:1">
+            <input id="gridH" type="number" value="7" min="3" max="20" style="flex:1">
+            <input id="gridA" type="number" value="5" min="1" max="10" style="flex:1">
+        </div>
+    </div>
+    <div class="toolbar">
+        <button class="btn-primary" onclick="genGrid()">生成</button>
+        <button class="btn-gray" id="btnStart" onclick="setMode('start')">📍S</button>
+        <button class="btn-gray" id="btnEnd" onclick="setMode('end')">🏁E</button>
+        <button class="btn-gray" id="btnMid" onclick="setMode('mid')">🔄M</button>
+        <button class="btn-gray" id="btnNfz" onclick="setMode('nfz')">🚫禁飞</button>
+    </div>
+    <div>
+        <label>因素画笔 人流/风力/天气</label>
+        <div style="display:flex;gap:3px">
+            <input id="fc" type="number" value="5" min="1" max="9" style="flex:1">
+            <input id="fw" type="number" value="5" min="1" max="9" style="flex:1">
+            <input id="fwe" type="number" value="5" min="1" max="9" style="flex:1">
+            <button class="btn-gray" id="btnFactor" onclick="setMode('factor')" style="flex:1">🎨 单格</button>
+            <button class="btn-gray" onclick="applyFactorsAll()" style="flex:1">全部</button>
+        </div>
+    </div>
+    <div>
+        <label>航线参数 宽(m)/高(m)</label>
+        <div style="display:flex;gap:4px">
+            <input id="rw" type="number" value="0" placeholder="宽度">
+            <input id="rh" type="number" value="100" placeholder="高度上限">
+        </div>
+    </div>
+    <div>
+        <label>规则引擎 <button class="btn-gray" style="padding:2px 6px;font-size:10px" onclick="addRule()">+</button></label>
+        <div id="rulesContainer"></div>
+    </div>
+    <button class="btn-primary" style="font-size:15px;padding:10px" onclick="runRoute()">🚀 计算航线</button>
+    <button class="btn-gray" style="font-size:15px;padding:10px;background:#8b5cf6" onclick="batchTest()">📋 读取文件批量测试</button>
+    <div id="result"></div>
+    <div id="info" style="font-size:11px;color:#94a3b8;padding:4px;border:1px solid #334155;border-radius:4px;min-height:40px;">🖱 悬停格子查看坐标</div>
+    <div class="legend">
+        <span><span class="dot" style="background:#22c55e"></span>S</span>
+        <span><span class="dot" style="background:#ef4444"></span>E</span>
+        <span><span class="dot" style="background:#f59e0b"></span>M</span>
+        <span><span class="dot" style="background:rgba(239,68,68,.6)"></span>禁飞</span>
+        <span><span class="dot" style="background:#3b82f6"></span>航线</span>
+        <span><small>色=高度层(红→蓝)</small></span>
+    </div>
+</div>
+<div id="canvas-wrap">
+    <canvas id="canvas"></canvas>
+</div>
+
+<script>
+// ===== Perspective-style 3D Projection with Pan/Zoom =====
+// 极端分散模式：间距×10，点极小，高度极度拉伸
+const TILE_W = 1;       // ← 点极小
+const TILE_H = 3;
+const GAP = 320;        // ← 间距×10
+const Z_STRETCH = 4000;  // ← 高度极度拉伸
+let CX = 0, CY = 0;
+let panX = 0, panY = 0;
+let isDragging = false, dragStartX, dragStartY;
+let scale = 1;
+
+// 倾斜视角：减少 XY 权重，让层叠更侧向可见
+function isoX(i, j, k) {
+    return CX + panX + ((i - j) * 0.6 + k * 0.3) * (TILE_W + GAP) * scale;
+}
+function isoY(i, j, k) {
+    return CY + panY + ((i + j) * 0.4 - k * 1.2) * (TILE_H + GAP) * scale;
+}
+
+// ===== State =====
+let gridW = 7, gridH = 7, gridA = 5;
+let mode = 'start';
+let startKey = null, endKey = null;
+let midpoints = [];
+let nfzSet = new Set();
+let factorsMap = {};
+let hoveredKey = null; // ← 鼠标悬停高亮
+
+function idx(i, j, k) { return i + '_' + j + '_' + k; }
+function parseIdx(key) { return key.split('_').map(Number); }
+
+// ===== Init =====
+function $ (id) { return document.getElementById(id); }
+function canvasEl() { return $('canvas'); }
+function ctx() { return canvasEl().getContext('2d'); }
+
+setMode('start');
+genGrid();
+addRule();
+
+function setMode(m) {
+    mode = m;
+    ['btnStart','btnEnd','btnMid','btnNfz','btnFactor'].forEach(id => $(id).style.background = '');
+    let c = m==='start'?'#22c55e':m==='end'?'#ef4444':m==='mid'?'#f59e0b':m==='factor'?'#8b5cf6':'#ef4444';
+    let b = m==='start'?'btnStart':m==='end'?'btnEnd':m==='mid'?'btnMid':m==='factor'?'btnFactor':'btnNfz';
+    $(b).style.background = c; $(b).style.color = '#000';
+}
+
+function genGrid() {
+    gridW = parseInt($('gridW').value) || 7;
+    gridH = parseInt($('gridH').value) || 7;
+    gridA = parseInt($('gridA').value) || 5;
+    startKey = null; endKey = null; midpoints = []; nfzSet = new Set(); factorsMap = {};
+    // Center the grid
+    let c = canvasEl();
+    c.width = Math.max(800, window.innerWidth - 400);
+    c.height = Math.max(600, window.innerHeight - 40);
+    CX = c.width / 2;
+    CY = c.height / 2 + (gridH * TILE_H) / 2;
+    draw();
+}
+
+function updateInfo(key) {
+    if (!key) { $('info').innerHTML = '🖱 悬停格子查看坐标'; return; }
+    let [i,j,k] = parseIdx(key);
+    let lon = r(119.0 + i * 0.001 + 0.0005);
+    let lat = r(29.0 + j * 0.001 + 0.0005);
+    let alt = k * 100 + 50;
+    let f = factorsMap[key];
+    let nfz = nfzSet.has(key) ? ' 🚫禁飞' : '';
+    let isS = key === startKey ? ' 📍起点' : '';
+    let isE = key === endKey ? ' 🏁终点' : '';
+    let isM = midpoints.includes(key) ? ' 🔄中途' : '';
+    let factorStr = f ? ` | 人流:${f.crowd} 风力:${f.wind} 天气:${f.weather}` : '';
+    $('info').innerHTML = `<b>${key}</b>${isS}${isE}${isM}${nfz}<br>` +
+        `经度:${lon} 纬度:${lat} 高度:${alt}m${factorStr}`;
+}
+
+function getFactorVals() {
+    return {crowd: parseInt($('fc').value)||5, wind: parseInt($('fw').value)||5, weather: parseInt($('fwe').value)||5};
+}
+
+function applyFactorsAll() {
+    let f = getFactorVals();
+    for (let i = 0; i < gridW; i++)
+        for (let j = 0; j < gridH; j++)
+            for (let k = 0; k < gridA; k++)
+                factorsMap[idx(i,j,k)] = {...f};
+    draw();
+}
+
+function addRule() {
+    let div = document.createElement('div');
+    div.className = 'rule-row';
+    div.innerHTML = `<select class="fn"><option>crowd</option><option>wind</option><option>weather</option></select>
+        <input class="mn" type="number" value="5" min="1" max="9" style="width:36px">
+        <input class="mx" type="number" value="9" min="1" max="9" style="width:36px">
+        <input class="mc" type="number" value="0.3" min="0" max="1" step="0.05" style="width:40px">
+        <input class="Mc" type="number" value="1" min="0" max="1" step="0.05" style="width:40px">
+        <button class="btn-danger" style="padding:2px 4px;font-size:10px" onclick="this.parentElement.remove()">×</button>`;
+    $('rulesContainer').appendChild(div);
+}
+
+function collectRules() {
+    let r = [];
+    $('rulesContainer').querySelectorAll('.rule-row').forEach(row => {
+        r.push({ factorName: row.querySelector('.fn').value, minThreshold: +row.querySelector('.mn').value || 0,
+            maxThreshold: +row.querySelector('.mx').value || 9, minCoverageRate: +row.querySelector('.mc').value || 0,
+            maxCoverageRate: +row.querySelector('.Mc').value || 1 });
+    });
+    return r;
+}
+
+// ===== Isometric Drawing =====
+function draw() {
+    let c = canvasEl(), cx = ctx();
+    cx.clearRect(0, 0, c.width, c.height);
+
+    // Draw from back to front (painter's algorithm)
+    // Order: by (i+j) ascending, then k ascending
+    let cells = [];
+    for (let i = 0; i < gridW; i++)
+        for (let j = 0; j < gridH; j++)
+            for (let k = 0; k < gridA; k++)
+                cells.push({i,j,k, key: idx(i,j,k)});
+    cells.sort((a,b) => (a.i+a.j) - (b.i+b.j) || a.k - b.k);
+
+    cells.forEach(({i,j,k,key}) => {
+        let x = isoX(i,j,k), y = isoY(i,j,k);
+        let f = factorsMap[key];
+        let avg = f ? (f.crowd + f.wind + f.weather)/3 : 5;
+        let isNfz = nfzSet.has(key);
+        // 按层数映射色相: 0→红 中层→绿 高层→蓝
+        let hue = (k / Math.max(1, gridA - 1)) * 240; // 0~240 红→蓝
+        let sat = 40 + avg / 9 * 50;  // 因素值影响饱和度
+        let lit = 25 + avg / 9 * 40;  // 因素值影响亮度
+        let color = `hsl(${hue},${sat}%,${lit}%)`;
+        drawDot(cx, x, y, color, isNfz, k, Math.max(0,gridA-1));
+    });
+
+    // Draw points (S, E, M)
+    function pt(key, color, label) {
+        if (!key) return;
+        let [i,j,k] = parseIdx(key);
+        let x = isoX(i,j,k), y = isoY(i,j,k);
+        cx.fillStyle = color;
+        cx.beginPath();
+        cx.arc(x, y, 9 * Math.sqrt(scale), 0, Math.PI*2);
+        cx.fill();
+        cx.strokeStyle = '#fff'; cx.lineWidth = 2; cx.stroke();
+        if (scale > 0.5) {
+            cx.fillStyle = '#fff'; cx.font = 'bold 10px sans-serif';
+            cx.textAlign = 'center'; cx.fillText(label, x, y - 13);
+        }
+    }
+    pt(startKey, '#22c55e', 'S');
+    pt(endKey, '#ef4444', 'E');
+    midpoints.forEach((k,i) => pt(k, '#f59e0b', 'M'));
+
+    // Hover highlight
+    if (hoveredKey) {
+        let [hi, hj, hk] = parseIdx(hoveredKey);
+        let hx = isoX(hi, hj, hk), hy = isoY(hi, hj, hk);
+        cx.strokeStyle = '#fbbf24';
+        cx.lineWidth = 2;
+        let hr = 9 * scale;
+        cx.beginPath();
+        cx.arc(hx, hy, hr, 0, Math.PI * 2);
+        cx.stroke();
+    }
+}
+
+function drawDot(cx, x, y, color, isNfz, k, totalK) {
+    let r = 3 + (k / Math.max(1, totalK)) * 5 * scale; // 越上层点越大，随缩放调整
+    cx.fillStyle = color;
+    cx.beginPath();
+    cx.arc(x, y, r, 0, Math.PI * 2);
+    cx.fill();
+    if (isNfz) {
+        cx.strokeStyle = '#ef4444';
+        cx.lineWidth = Math.max(1.5, 2 * scale);
+        cx.stroke();
+    } else {
+        cx.strokeStyle = '#334155';
+        cx.lineWidth = Math.max(0.5, scale);
+        cx.stroke();
+    }
+}
+
+// ===== Canvas Drag & Zoom =====
+canvasEl().addEventListener('mousedown', e => {
+    isDragging = true; dragStartX = e.clientX; dragStartY = e.clientY;
+    e.preventDefault();
+});
+canvasEl().addEventListener('mousemove', e => {
+    if (isDragging) {
+        panX += e.clientX - dragStartX;
+        panY += e.clientY - dragStartY;
+        dragStartX = e.clientX; dragStartY = e.clientY;
+        draw();
+    } else {
+        // Hover highlight
+        let rect = canvasEl().getBoundingClientRect();
+        let mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        let best = null, bestDist = Infinity;
+        let maxR = 40 * scale; // 随缩放调整查找半径
+        for (let i = 0; i < gridW; i++)
+            for (let j = 0; j < gridH; j++)
+                for (let k = 0; k < gridA; k++) {
+                    let x = isoX(i,j,k), y = isoY(i,j,k);
+                    let d = Math.hypot(mx - x, my - y);
+                    if (d < bestDist && d < maxR) { bestDist = d; best = idx(i,j,k); }
+                }
+        if (best !== hoveredKey) { hoveredKey = best; draw(); updateInfo(best); }
+    }
+});
+canvasEl().addEventListener('mouseleave', () => { hoveredKey = null; draw(); $('info').innerHTML = '🖱 悬停格子查看坐标'; });
+window.addEventListener('mouseup', () => { isDragging = false; });
+canvasEl().addEventListener('wheel', e => {
+    e.preventDefault();
+    let newScale = scale - e.deltaY * 0.002;
+    scale = Math.max(0.25, Math.min(3, newScale));
+    draw();
+});
+
+// Click: only if not dragging
+canvasEl().addEventListener('click', e => {
+    if (isDragging) return;
+    let rect = canvasEl().getBoundingClientRect();
+    let mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    let best = null, bestDist = Infinity;
+    let maxR = 40 * scale; // 随缩放调整点击命中半径
+    for (let i = 0; i < gridW; i++)
+        for (let j = 0; j < gridH; j++)
+            for (let k = 0; k < gridA; k++) {
+                let x = isoX(i,j,k), y = isoY(i,j,k);
+                let d = Math.hypot(mx - x, my - y);
+                if (d < bestDist && d < maxR) { bestDist = d; best = idx(i,j,k); }
+            }
+    if (!best) return;
+    if (mode === 'start') { startKey = best; mode='end'; setMode('end'); }
+    else if (mode === 'end') { endKey = best; mode='start'; setMode('start'); }
+    else if (mode === 'mid') { midpoints.includes(best) ? midpoints = midpoints.filter(m=>m!==best) : midpoints.push(best); }
+    else if (mode === 'nfz') { nfzSet.has(best) ? nfzSet.delete(best) : nfzSet.add(best); }
+    else if (mode === 'factor') { factorsMap[best] = getFactorVals(); }
+    draw();
+});
+
+// ===== Build and send request =====
+// 精度控制：消除 JS 浮点累积误差，如 119.00150000000001 → 119.0015
+function r(v) { return Math.round(v * 1e7) / 1e7; }
+
+function lonAt(i) { return r(119.0 + i * 0.001 + 0.0005); }
+function latAt(j) { return r(29.0 + j * 0.001 + 0.0005); }
+function altAt(k) { return k * 100 + 50; }
+
+function buildGrids() {
+    let grids = [];
+    for (let i = 0; i < gridW; i++)
+        for (let j = 0; j < gridH; j++)
+            for (let k = 0; k < gridA; k++) {
+                let key = idx(i,j,k);
+                let f = factorsMap[key];
+                grids.push({
+                    id: 'g_' + i + '_' + j + '_' + k,
+                    centerPoint: { longitude: lonAt(i), latitude: latAt(j), altitude: altAt(k) },
+                    factors: f || null
+                });
+            }
+    return grids;
+}
+
+function pt2coord(key) {
+    let [i,j,k] = parseIdx(key);
+    return { longitude: r(lonAt(i) + 1e-7), latitude: r(latAt(j) + 1e-7), altitude: altAt(k) + 1e-7 };
+}
+
+function buildNoFly() {
+    return [...nfzSet].map(key => {
+        let [i,j,k] = parseIdx(key);
+        return { id: 'g_'+i+'_'+j+'_'+k, centerPoint: { longitude: lonAt(i), latitude: latAt(j), altitude: altAt(k) }};
+    });
+}
+
+async function runRoute() {
+    if (!startKey || !endKey) { alert('请先设置起点和终点'); return; }
+    $('result').innerHTML = '<span style="color:#f59e0b">计算中...</span>';
+
+    let body = {
+        grids: buildGrids(),
+        startPoint: pt2coord(startKey),
+        endPoint: pt2coord(endKey),
+        midPoints: midpoints.map(k => pt2coord(k)),
+        noFlyZones: buildNoFly(),
+        routeWidth: +($('rw').value) || 0,
+        routeHeight: +($('rh').value) || 5000,
+        rules: collectRules()
+    };
+
+    try {
+        let resp = await fetch('/api/route/shortest', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+        let data = await resp.json();
+        if (data.success && data.pathGrids) {
+            $('result').innerHTML = `<div class="success">✅ ${data.message}</div>`;
+            drawRoute(data.pathGrids);
+        } else {
+            $('result').innerHTML = `<div class="fail">❌ ${data.message || '失败'}</div>`;
+        }
+    } catch(e) {
+        $('result').innerHTML = `<div class="fail">❌ ${e.message}</div>`;
+    }
+}
+
+function drawRoute(path) {
+    draw();
+    if (!path || path.length < 2) return;
+    let cx = ctx();
+    cx.strokeStyle = '#3b82f6';
+    cx.lineWidth = Math.max(2, 3 * scale);
+    cx.lineCap = 'round';
+    cx.lineJoin = 'round';
+    cx.beginPath();
+    path.forEach((g, i) => {
+        let m = g.id.match(/g_(\d+)_(\d+)_(\d+)/); if (!m) return;
+        let xi = +m[1], yi = +m[2], zi = +m[3];
+        let px = isoX(xi, yi, zi), py = isoY(xi, yi, zi);
+        if (i === 0) cx.moveTo(px, py);
+        else cx.lineTo(px, py);
+    });
+    cx.stroke();
+}
+
+async function batchTest() {
+    $('result').innerHTML = '<span style="color:#f59e0b">读取文件中...</span>';
+    let resp = await fetch('/api/route/batch');
+    let data = await resp.json();
+    if (data.error) { $('result').innerHTML = `<div class="fail">${data.error}</div>`; return; }
+    let html = `<div style="color:#22c55e">✅ ${data.success}/${data.total} 成功</div>`;
+    html += `<table style="width:100%;font-size:11px;border-collapse:collapse">`;
+    data.results.forEach(r => {
+        html += `<tr><td>#${r.line}</td><td style="color:${r.success?'#22c55e':'#ef4444'}">${r.success?'✅':'❌'} ${r.message}</td></tr>`;
+    });
+    html += '</table>';
+    $('result').innerHTML = html;
+}
+</script>
+</body>
+</html>
