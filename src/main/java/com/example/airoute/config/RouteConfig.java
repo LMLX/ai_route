@@ -23,4 +23,7 @@ public class RouteConfig {
 
     /** 规则覆盖率不达标时，因素权重倍增的最大重试次数 */
     private int ruleRetryMaxTimes = 2;
+
+    /** 网格边长（米），默认 100m。影响线宽换算和高度步长 */
+    private double gridSizeMeters = 100.0;
 }

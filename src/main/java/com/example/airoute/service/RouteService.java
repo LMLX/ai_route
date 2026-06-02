@@ -39,9 +39,6 @@ public class RouteService {
 
     // ====== 常量 ======
 
-    /** 网格固定边长（米） */
-    private static final double GRID_SIZE_METERS = 100.0;
-
     /** 每度纬度 ≈ 111320 米（用于经纬度 → 米制转换） */
     private static final double METERS_PER_DEGREE_LAT = 111320.0;
 
@@ -112,7 +109,7 @@ public class RouteService {
             return fail("网格数据为空");
         }
 
-        int widthInGrids = Math.max(1, (int) Math.ceil(routeWidth / GRID_SIZE_METERS));
+        int widthInGrids = Math.max(1, (int) Math.ceil(routeWidth / routeConfig.getGridSizeMeters()));
         double penaltyFactor = routeConfig.getScorePenaltyFactor();
         boolean hasRules = rules != null && !rules.isEmpty();
 
@@ -474,14 +471,14 @@ public class RouteService {
         }
         // 垂直豁免：Waypoint 同一 XY 位置的所高度层全放行（构成“垂直电梯井”），
         // 这样即使 routeHeight 限制中间高度，A* 也能沿着电梯顺升/降到达目标层。
-        for (Grid wp : waypointGrids) {
-            for (int k = 0; k < 100; k++) {
-                String key = indexKey(wp.getIndexLon(), wp.getIndexLat(), k);
-                Grid g = index.gridMap.get(key);
-                if (g == null) break; // 这层没有 → 上面也不会再 高度步长固定 100m
-                exempt.add(g.getId());
-            }
-        }
+//        for (Grid wp : waypointGrids) {
+//            for (int k = 0; k < 100; k++) {
+//                String key = indexKey(wp.getIndexLon(), wp.getIndexLat(), k);
+//                Grid g = index.gridMap.get(key);
+//                if (g == null) break; // 这层没有 → 上面也不会再 高度步长固定 100m
+//                exempt.add(g.getId());
+//            }
+//        }
         return exempt;
     }
 
@@ -651,7 +648,7 @@ public class RouteService {
 
         double cellLonDeg = cols > 1 ? (maxCenterLon - minCenterLon) / (cols - 1) : 0.001;
         double cellLatDeg = rows > 1 ? (maxCenterLat - minCenterLat) / (rows - 1) : 0.001;
-        double cellAlt = GRID_SIZE_METERS;
+        double cellAlt = routeConfig.getGridSizeMeters();
 
         // 防止除零
         if (cellLonDeg < 1e-12) cellLonDeg = 0.001;
