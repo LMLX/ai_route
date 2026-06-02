@@ -139,7 +139,7 @@ function genGrid() {
     gridA = parseInt($('gridA').value) || 5;
     startKey = null; endKey = null; midpoints = []; nfzSet = new Set(); factorsMap = {};
     factorRows = []; pendingFactorRow = -1; $('factorList').innerHTML = '';
-    addFactorRow();
+    addFactorRow(null);
     // Center the grid
     let c = canvasEl();
     c.width = Math.max(800, window.innerWidth - 400);
@@ -165,20 +165,20 @@ function updateInfo(key) {
         `经度:${lon} 纬度:${lat} 高度:${alt}m${factorStr}`;
 }
 
-function addFactorRow(cellKey = '') {
+function addFactorRow(rowData) {
+    let r = rowData || {crowd:5, wind:5, weather:5, cellKey:''};
     let div = document.createElement('div');
     div.style.cssText = 'display:flex;gap:2px;align-items:center;margin:2px 0;font-size:11px';
     let idx = factorRows.length;
-    factorRows.push({crowd:5,wind:5,weather:5,cellKey:cellKey});
-    div.innerHTML = `<span style="min-width:50px;color:#94a3b8">${cellKey||'未选'}</span>
-        <input class="fcv" value="5" style="width:28px;padding:2px" onchange="factorRows[${idx}].crowd=+this.value">
-        <input class="fwv" value="5" style="width:28px;padding:2px" onchange="factorRows[${idx}].wind=+this.value">
-        <input class="fwev" value="5" style="width:28px;padding:2px" onchange="factorRows[${idx}].weather=+this.value">
+    factorRows.push({...r});
+    div.innerHTML = `<span style="min-width:50px;color:${r.cellKey?'#e2e8f0':'#94a3b8'}">${r.cellKey||'未选'}</span>
+        <input class="fcv" value="${r.crowd}" style="width:28px;padding:2px" onchange="factorRows[${idx}].crowd=+this.value">
+        <input class="fwv" value="${r.wind}" style="width:28px;padding:2px" onchange="factorRows[${idx}].wind=+this.value">
+        <input class="fwev" value="${r.weather}" style="width:28px;padding:2px" onchange="factorRows[${idx}].weather=+this.value">
         <button class="btn-gray" style="padding:0 4px;font-size:10px" onclick="pickCellForRow(${idx})">🎯</button>
         <button class="btn-danger" style="padding:0 4px;font-size:10px" onclick="removeFactorRow(${idx})">×</button>`;
     div.id = 'frow_' + idx;
     $('factorList').appendChild(div);
-    if (!cellKey) pickCellForRow(idx);
 }
 
 function pickCellForRow(idx) {
@@ -192,10 +192,10 @@ function pickFactorCell() {
 }
 
 function rebuildFactorUI() {
-    let rows = [...factorRows]; // 拷贝
+    let rows = [...factorRows];
     factorRows = [];
     $('factorList').innerHTML = '';
-    rows.forEach(r => addFactorRow(r.cellKey)); // addFactorRow 会 push 到 factorRows
+    rows.forEach(r => addFactorRow(r));
 }
 
 function removeFactorRow(idx) {

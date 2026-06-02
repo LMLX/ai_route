@@ -151,8 +151,16 @@ public class RouteService {
         double minAlt = waypointGrids.stream().mapToDouble(g -> g.getCenterPoint().getAltitude()).min().orElse(0) - halfH;
         double maxAlt = waypointGrids.stream().mapToDouble(g -> g.getCenterPoint().getAltitude()).max().orElse(0) + halfH;
 
-        // ===== 4. 基础因素权重 =====
-        // 来自 application.properties 中的 route.factor-weights.*
+        // ===== 4. 规则匹配集（用于给匹配格折扣、不匹配格惩罚） =====
+        Set<String> ruleMatchIds = new HashSet<>();
+        if (hasRules) {
+            for (Grid g : grids) {
+                if (rules.stream().anyMatch(r -> evaluateRule(g, r))) ruleMatchIds.add(g.getId());
+            }
+        }
+        double ruleBonus = penaltyFactor * 2.0; // 匹配格回扣（米）
+
+        // ===== 5. 基础因素权重 =====
         Map<String, Double> baseWeights = new LinkedHashMap<>(routeConfig.getFactorWeights());
 
         // ===== 5. 规则引擎：自动重试循环 =====
@@ -162,8 +170,9 @@ public class RouteService {
         RouteResult bestResult = null; // 保留覆盖率最高的结果
 
         for (int retry = 0; retry <= maxRetry; retry++) {
-            // 5.1 构造本轮权重：不达标因素倍增
+            // 5.1 构造本轮权重 + 惩罚因子倍增（避免单因素时权重抵消）
             Map<String, Double> weights = buildRetryWeights(baseWeights, rules, retry, bestResult);
+            double effectivePenalty = penaltyFactor * (1 + retry * 2); // 每次重试惩罚×3/5/7...
 
             // 5.2 逐段 A* 搜索：[start→mid1], [mid1→mid2], ..., [midN→end]
             List<List<Grid>> segments = new ArrayList<>();
@@ -172,7 +181,8 @@ public class RouteService {
                 List<Grid> seg = aStarSearch(index,
                         waypointGrids.get(i), waypointGrids.get(i + 1),
                         minAlt, maxAlt, noFlyData, passableZones,
-                        exemptGridIds, weights, penaltyFactor);
+                        exemptGridIds, weights, effectivePenalty,
+                        ruleMatchIds, ruleBonus);
                 if (seg == null) { segmentFailed = true; break; }
                 segments.add(seg);
             }
@@ -752,7 +762,8 @@ public class RouteService {
                                     NoFlyData noFlyData, Set<String> passableZones,
                                     Set<String> exemptGridIds,
                                     Map<String, Double> factorWeights,
-                                    double penaltyFactor) {
+                                    double penaltyFactor,
+                                    Set<String> ruleMatchIds, double ruleBonus) {
         Map<String, Grid> gridMap = index.gridMap;
 
         // openSet: 待探索节点，按 fScore 排序（最小优先）
@@ -804,6 +815,10 @@ public class RouteService {
                 double baseDist = distanceMeters(current.grid.getCenterPoint(), neighbor.getCenterPoint(), index);
                 double penalty = scorePenalty(neighbor, factorWeights, penaltyFactor);
                 double moveCost = baseDist + penalty;
+                // 规则奖励：匹配格享受折扣，不匹配格接受惩罚
+                if (!ruleMatchIds.isEmpty()) {
+                    moveCost += ruleMatchIds.contains(neighbor.getId()) ? -ruleBonus : ruleBonus;
+                }
                 double tentativeG = current.gScore + moveCost;
 
                 // 更新或创建邻居节点
