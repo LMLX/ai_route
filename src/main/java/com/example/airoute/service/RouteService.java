@@ -440,11 +440,23 @@ public class RouteService {
         Set<String> exempt = new LinkedHashSet<>();
         Queue<Grid> queue = new LinkedList<>();
 
-        // 必经点永远豁免；但仅当必经点自己被封锁时才 BFS 扩散
+        // 必经点永远豁免；入队条件：自身被封锁 或 被封锁邻居包围（防止孤立）
         for (Grid wp : waypointGrids) {
             exempt.add(wp.getId());
             if (isGridBlocked(wp, noFlyData, passableZones)) {
                 queue.add(wp);
+            } else {
+                // 虽然自身解锁了，但如果有任何邻居被封锁 → 仍需扩散
+                for (int[] dir : NEIGHBOR_DIRECTIONS) {
+                    Grid nb = index.gridMap.get(indexKey(
+                            wp.getIndexLon() + dir[0],
+                            wp.getIndexLat() + dir[1],
+                            wp.getIndexAlt() + dir[2]));
+                    if (nb != null && isGridBlocked(nb, noFlyData, passableZones)) {
+                        queue.add(wp);
+                        break;
+                    }
+                }
             }
         }
 
@@ -468,16 +480,6 @@ public class RouteService {
                 // 不被封锁 → 不扩散，这方向到此为止
             }
         }
-        // 垂直豁免：Waypoint 同一 XY 位置的所高度层全放行（构成“垂直电梯井”），
-        // 这样即使 routeHeight 限制中间高度，A* 也能沿着电梯顺升/降到达目标层。
-//        for (Grid wp : waypointGrids) {
-//            for (int k = 0; k < 100; k++) {
-//                String key = indexKey(wp.getIndexLon(), wp.getIndexLat(), k);
-//                Grid g = index.gridMap.get(key);
-//                if (g == null) break; // 这层没有 → 上面也不会再 高度步长固定 100m
-//                exempt.add(g.getId());
-//            }
-//        }
         return exempt;
     }
 
