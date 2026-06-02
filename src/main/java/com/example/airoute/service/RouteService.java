@@ -429,9 +429,12 @@ public class RouteService {
         Set<String> exempt = new LinkedHashSet<>();
         Queue<Grid> queue = new LinkedList<>();
 
-        // 所有必经点网格入队
+        // 必经点永远豁免；但仅当必经点自己被封锁时才 BFS 扩散
         for (Grid wp : waypointGrids) {
-            if (exempt.add(wp.getId())) queue.add(wp);
+            exempt.add(wp.getId());
+            if (isGridBlocked(wp, noFlyData, passableZones)) {
+                queue.add(wp);
+            }
         }
 
         while (!queue.isEmpty()) {
