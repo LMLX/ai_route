@@ -146,6 +146,11 @@ public class RouteService {
         // BFS 洪泛：必经点所在连续封锁区 → 全豁免
         Set<String> exemptGridIds = computeExemptRegion(waypointGrids, index, noFlyData, passableZones);
 
+        // 高度走廊：以必经点海拔为中心，±routeHeight/2
+        double halfH = routeHeight / 2;
+        double minAlt = waypointGrids.stream().mapToDouble(g -> g.getCenterPoint().getAltitude()).min().orElse(0) - halfH;
+        double maxAlt = waypointGrids.stream().mapToDouble(g -> g.getCenterPoint().getAltitude()).max().orElse(0) + halfH;
+
         // ===== 4. 基础因素权重 =====
         // 来自 application.properties 中的 route.factor-weights.*
         Map<String, Double> baseWeights = new LinkedHashMap<>(routeConfig.getFactorWeights());
@@ -166,7 +171,7 @@ public class RouteService {
             for (int i = 0; i < waypointGrids.size() - 1; i++) {
                 List<Grid> seg = aStarSearch(index,
                         waypointGrids.get(i), waypointGrids.get(i + 1),
-                        routeHeight, noFlyData, passableZones,
+                        minAlt, maxAlt, noFlyData, passableZones,
                         exemptGridIds, weights, penaltyFactor);
                 if (seg == null) { segmentFailed = true; break; }
                 segments.add(seg);
@@ -181,7 +186,7 @@ public class RouteService {
             // 5.3 合并多段 + 走廊扩展
             List<Grid> fullPath = mergeSegments(segments);
             if (widthInGrids > 1) {
-                fullPath = expandCorridor(index, fullPath, widthInGrids, routeHeight,
+                fullPath = expandCorridor(index, fullPath, widthInGrids, minAlt, maxAlt,
                         noFlyData, passableZones, exemptGridIds);
             }
 
@@ -743,7 +748,7 @@ public class RouteService {
      * @return 最短路径（网格列表），找不到返回 null
      */
     private List<Grid> aStarSearch(GridIndex index, Grid start, Grid end,
-                                    double maxAltitude,
+                                    double minAltitude, double maxAltitude,
                                     NoFlyData noFlyData, Set<String> passableZones,
                                     Set<String> exemptGridIds,
                                     Map<String, Double> factorWeights,
@@ -785,9 +790,10 @@ public class RouteService {
 
                 // 不存在 → 跳过
                 if (neighbor == null) continue;
-                // 超高度且不在豁免集 → 跳过（必经点/BFS豁免区即使超高度也可走）
+                // 高度不在走廊范围且不在豁免集 → 跳过
+                double alt = neighbor.getCenterPoint().getAltitude();
                 if (!exemptGridIds.contains(neighbor.getId())
-                        && neighbor.getCenterPoint().getAltitude() > maxAltitude) continue;
+                        && (alt < minAltitude || alt > maxAltitude)) continue;
                 // 禁飞区/因素 → 跳过
                 if (!isGridPassable(neighbor, noFlyData, passableZones, exemptGridIds)) continue;
 
@@ -874,7 +880,7 @@ public class RouteService {
      * 同样遵循禁飞区和因素检查。
      */
     private List<Grid> expandCorridor(GridIndex index, List<Grid> corePath,
-                                       int routeWidth, double maxAltitude,
+                                       int routeWidth, double minAlt, double maxAlt,
                                        NoFlyData noFlyData, Set<String> passableZones,
                                        Set<String> exemptGridIds) {
         Set<String> corridorKeys = new HashSet<>();
@@ -888,8 +894,9 @@ public class RouteService {
                     int ni = g.getIndexLon() + di;
                     int nj = g.getIndexLat() + dj;
                     Grid neighbor = gridMap.get(indexKey(ni, nj, g.getIndexAlt()));
+                    double alt = neighbor.getCenterPoint().getAltitude();
                     if (neighbor != null
-                            && neighbor.getCenterPoint().getAltitude() <= maxAltitude
+                            && alt >= minAlt && alt <= maxAlt
                             && isGridPassable(neighbor, noFlyData, passableZones, exemptGridIds)
                             && corridorKeys.add(gridKey(neighbor))) {
                         corridor.add(neighbor);
