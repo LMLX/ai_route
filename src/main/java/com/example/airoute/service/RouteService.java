@@ -155,7 +155,6 @@ public class RouteService {
                 if (rules.stream().anyMatch(r -> evaluateRule(g, r))) ruleMatchIds.add(g.getId());
             }
         }
-        double ruleBonus = penaltyFactor * 2.0; // 匹配格回扣（米）
 
         // ===== 5. 基础因素权重 =====
         Map<String, Double> baseWeights = new LinkedHashMap<>(routeConfig.getFactorWeights());
@@ -179,7 +178,7 @@ public class RouteService {
                         waypointGrids.get(i), waypointGrids.get(i + 1),
                         minAlt, maxAlt, noFlyData, passableZones,
                         exemptGridIds, weights, effectivePenalty,
-                        ruleMatchIds, ruleBonus);
+                        ruleMatchIds);
                 if (seg == null) { segmentFailed = true; break; }
                 segments.add(seg);
             }
@@ -760,7 +759,7 @@ public class RouteService {
                                     Set<String> exemptGridIds,
                                     Map<String, Double> factorWeights,
                                     double penaltyFactor,
-                                    Set<String> ruleMatchIds, double ruleBonus) {
+                                    Set<String> ruleMatchIds) {
         Map<String, Grid> gridMap = index.gridMap;
 
         // openSet: 待探索节点，按 fScore 排序（最小优先）
@@ -812,9 +811,10 @@ public class RouteService {
                 double baseDist = distanceMeters(current.grid.getCenterPoint(), neighbor.getCenterPoint(), index);
                 double penalty = scorePenalty(neighbor, factorWeights, penaltyFactor);
                 double moveCost = baseDist + penalty;
-                // 规则奖励：匹配格享受折扣，不匹配格接受惩罚
+                // 规则代价：匹配格折扣，不匹配格加倍（用乘数避免负数）
                 if (!ruleMatchIds.isEmpty()) {
-                    moveCost += ruleMatchIds.contains(neighbor.getId()) ? -ruleBonus : ruleBonus;
+                    double mult = ruleMatchIds.contains(neighbor.getId()) ? 0.05 : 3.0;
+                    moveCost = baseDist * mult + penalty;
                 }
                 double tentativeG = current.gScore + moveCost;
 
