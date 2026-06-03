@@ -374,13 +374,9 @@ public class RouteService {
             if (fullGridIds.contains(nfz.getId())) {
                 matchedGridId = nfz.getId();
             } else {
-                // 2. 坐标兜底：找中心点落入哪个全量网格
-                for (Grid full : index.gridMap.values()) {
-                    if (isPointInGrid(full, nfz.getCenterPoint(), index)) {
-                        matchedGridId = full.getId();
-                        break;
-                    }
-                }
+                // 2. 坐标兜底：O(1) 索引反算（替代 O(n) 遍历）
+                Grid matched = findGridByIndex(nfz.getCenterPoint(), index);
+                if (matched != null) matchedGridId = matched.getId();
             }
 
             if (matchedGridId != null) {
@@ -667,7 +663,8 @@ public class RouteService {
         }
 
         return new GridIndex(indexMap, cellLonDeg, cellLatDeg, cellAlt,
-                halfLonDeg, halfLatDeg, halfAlt, metersPerDegLon);
+                halfLonDeg, halfLatDeg, halfAlt, metersPerDegLon,
+                minCenterLon, minCenterLat, minCenterAlt);
     }
 
     private String indexKey(int i, int j, int k) {
@@ -679,25 +676,59 @@ public class RouteService {
     // ======================================================================
 
     /**
-     * 根据坐标查找所属网格。
+     * 根据坐标查找所属网格（O(1) 索引反算）。
      * <ol>
-     *   <li>精确命中：点是否在中心 ± 半格范围内</li>
-     *   <li>退化：找最近中心点，但仅当距离 < 半格尺寸时才有效</li>
+     *   <li>直接用锚点 + 步长反算整数索引 → HashMap 查找</li>
+     *   <li>兜底：搜索 6 面邻居（处理边界浮点误差）</li>
+     *   <li>极端兜底：遍历找最近中心点（仅当坐标完全不在网格空间内时）</li>
      * </ol>
      * @return 找到的网格，或 null（坐标完全不在任何网格范围内）
      */
     private Grid findGridByPoint(List<Grid> grids, GeoPoint point, GridIndex index) {
-        for (Grid g : grids) {
-            if (isPointInGrid(g, point, index)) return g;
+        final double EPS = 1e-8;
+        // 1. O(1) 索引反算
+        int iLon = (int) Math.round((point.getLongitude() - index.anchorLon) / index.cellLonDeg + EPS);
+        int iLat = (int) Math.round((point.getLatitude() - index.anchorLat) / index.cellLatDeg + EPS);
+        int iAlt = (int) Math.round((point.getAltitude() - index.anchorAlt) / index.cellAlt + EPS);
+
+        Grid g = index.gridMap.get(indexKey(iLon, iLat, iAlt));
+        if (g != null && isPointInGrid(g, point, index)) return g;
+
+        // 2. 兜底：搜索 6 面邻居（处理浮点舍入边界）
+        for (int[] dir : NEIGHBOR_DIRECTIONS) {
+            g = index.gridMap.get(indexKey(iLon + dir[0], iLat + dir[1], iAlt + dir[2]));
+            if (g != null && isPointInGrid(g, point, index)) return g;
         }
+
+        // 3. 极端兜底：遍历最近中心点（坐标完全不在网格空间内）
         Grid nearest = null;
         double minDist = Double.MAX_VALUE;
-        for (Grid g : grids) {
-            double dist = g.getCenterPoint().distanceTo(point);
-            if (dist < minDist) { minDist = dist; nearest = g; }
+        for (Grid grid : grids) {
+            double dist = grid.getCenterPoint().distanceTo(point);
+            if (dist < minDist) { minDist = dist; nearest = grid; }
         }
-        // 最近格也必须在半格范围内才算有效；否则坐标完全在网格空间外
         if (nearest != null && isPointInGrid(nearest, point, index)) return nearest;
+        return null;
+    }
+
+    /**
+     * 纯索引反算（O(1)）：根据坐标直接用锚点+步长反算索引 → HashMap 查找。
+     * 不含 O(n) 兜底，用于禁飞区坐标匹配等场景（不需要 grids 列表）。
+     */
+    private Grid findGridByIndex(GeoPoint point, GridIndex index) {
+        final double EPS = 1e-8;
+        int iLon = (int) Math.round((point.getLongitude() - index.anchorLon) / index.cellLonDeg + EPS);
+        int iLat = (int) Math.round((point.getLatitude() - index.anchorLat) / index.cellLatDeg + EPS);
+        int iAlt = (int) Math.round((point.getAltitude() - index.anchorAlt) / index.cellAlt + EPS);
+
+        Grid g = index.gridMap.get(indexKey(iLon, iLat, iAlt));
+        if (g != null && isPointInGrid(g, point, index)) return g;
+
+        // 兜底：搜索 6 面邻居（处理浮点舍入边界）
+        for (int[] dir : NEIGHBOR_DIRECTIONS) {
+            g = index.gridMap.get(indexKey(iLon + dir[0], iLat + dir[1], iAlt + dir[2]));
+            if (g != null && isPointInGrid(g, point, index)) return g;
+        }
         return null;
     }
 
@@ -951,6 +982,7 @@ public class RouteService {
      *   <li><b>cellLonDeg/cellLatDeg/cellAlt</b>: 网格步长（度/度/米）</li>
      *   <li><b>halfLonDeg/halfLatDeg/halfAlt</b>: 半格尺寸，用于包围盒判断</li>
      *   <li><b>metersPerDegLon</b>: 经度→米转换因子</li>
+     *   <li><b>anchorLon/anchorLat/anchorAlt</b>: 最小中心点锚点，用于坐标→索引反算</li>
      * </ul>
      */
     private static class GridIndex {
@@ -958,12 +990,15 @@ public class RouteService {
         double cellLonDeg, cellLatDeg, cellAlt;
         double halfLonDeg, halfLatDeg, halfAlt;
         double metersPerDegLon;
+        double anchorLon, anchorLat, anchorAlt;
         GridIndex(Map<String, Grid> gridMap, double cellLonDeg, double cellLatDeg, double cellAlt,
-                  double halfLonDeg, double halfLatDeg, double halfAlt, double metersPerDegLon) {
+                  double halfLonDeg, double halfLatDeg, double halfAlt, double metersPerDegLon,
+                  double anchorLon, double anchorLat, double anchorAlt) {
             this.gridMap = gridMap;
             this.cellLonDeg = cellLonDeg; this.cellLatDeg = cellLatDeg; this.cellAlt = cellAlt;
             this.halfLonDeg = halfLonDeg; this.halfLatDeg = halfLatDeg; this.halfAlt = halfAlt;
             this.metersPerDegLon = metersPerDegLon;
+            this.anchorLon = anchorLon; this.anchorLat = anchorLat; this.anchorAlt = anchorAlt;
         }
     }
 
