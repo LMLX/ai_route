@@ -85,12 +85,13 @@ public class GridDataConverter {
                 grids.add(grid);
             }
         }
+        System.out.println(grids.size());
         // 浅大小：ArrayList 对象本身 + 底层数组引用的“槽位”，但不包含数组元素指向的 Integer 对象
 
         // 深大小：包括所有 Integer 对象以及底层数组的全部内容
-        long deepSize = GraphLayout.parseInstance(grids).totalSize();
-        System.out.println("Deep size: " + deepSize + " bytes");
-        long t2 = System.currentTimeMillis();
-        System.out.println(t2 - t1);
+//        long deepSize = GraphLayout.parseInstance(grids).totalSize();
+//        System.out.println("Deep size: " + deepSize + " bytes");
+//        long t2 = System.currentTimeMillis();
+//        System.out.println(t2 - t1);
     }
 }

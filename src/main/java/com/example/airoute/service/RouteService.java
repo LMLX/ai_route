@@ -43,21 +43,14 @@ public class RouteService {
     private static final double METERS_PER_DEGREE_LAT = 111320.0;
 
     /**
-     * 3D 网格 26 邻接方向：6 面 + 12 棱 + 8 角。
+     * 3D 网格 6 面邻接方向：仅单维变化。
      * 索引含义：[Δlon, Δlat, Δalt]，各维 ±1 或 0。
      */
     private static final int[][] NEIGHBOR_DIRECTIONS = {
             // 6 面相邻（单维变化）
             { 1,  0,  0}, {-1,  0,  0},
             { 0,  1,  0}, { 0, -1,  0},
-            { 0,  0,  1}, { 0,  0, -1},
-            // 12 棱相邻（双维变化）
-            { 1,  1,  0}, { 1, -1,  0}, {-1,  1,  0}, {-1, -1,  0},
-            { 1,  0,  1}, { 1,  0, -1}, {-1,  0,  1}, {-1,  0, -1},
-            { 0,  1,  1}, { 0,  1, -1}, { 0, -1,  1}, { 0, -1, -1},
-            // 8 角相邻（三维变化）
-            { 1,  1,  1}, { 1,  1, -1}, { 1, -1,  1}, { 1, -1, -1},
-            {-1,  1,  1}, {-1,  1, -1}, {-1, -1,  1}, {-1, -1, -1}
+            { 0,  0,  1}, { 0,  0, -1}
     };
 
     /** 全局配置（权重、惩罚因子等，来自 application.properties） */
@@ -420,7 +413,7 @@ public class RouteService {
     //  BFS 洪泛豁免
 
     /**
-     * 从每个必经点出发，BFS 沿所有<b>被封锁</b>的 26 邻接扩散，
+     * 从每个必经点出发，BFS 沿所有<b>被封锁</b>的 6 面邻接扩散，
      * 返回整片连续封锁区中所有需要豁免的网格 ID 集合。
      *
      * <h3>为什么需要？</h3>
@@ -462,7 +455,7 @@ public class RouteService {
 
         while (!queue.isEmpty()) {
             Grid current = queue.poll();
-            // 检查 26 个方向
+            // 检查 6 个面方向
             for (int[] dir : NEIGHBOR_DIRECTIONS) {
                 int ni = current.getIndexLon() + dir[0];
                 int nj = current.getIndexLat() + dir[1];
@@ -739,10 +732,8 @@ public class RouteService {
      * A* 要求启发函数<b>可采纳</b>（永不高估）。
      * 评分惩罚 ≥ 0，所以纯距离 ≤ 实际代价，满足条件。
      *
-     * <h3>26 方向邻接</h3>
-     * 面邻接（6 方向）→ 直线距离
-     * 棱邻接（12 方向）→ √2 × 100m ≈ 141m
-     * 角邻接（8 方向）→ √3 × 100m ≈ 173m
+     * <h3>6 方向面邻接</h3>
+     * 每个节点扩展 6 个面邻居（上/下/东/西/南/北），直线距离。
      *
      * @param index         空间索引
      * @param start         起点网格
@@ -766,13 +757,13 @@ public class RouteService {
 
         // openSet: 待探索节点，按 fScore 排序（最小优先）
         PriorityQueue<Node> openSet = new PriorityQueue<>(Comparator.comparingDouble(n -> n.fScore));
-        // nodeMap: 已生成节点的快速查找（用于更新更优路径）
-        Map<String, Node> nodeMap = new HashMap<>();
+        // bestG: 各网格当前已知最优 gScore（惰性更新用，避免 PriorityQueue.remove 的 O(n) 开销）
+        Map<String, Double> bestG = new HashMap<>();
 
         // 起点入队（g=0, h=到终点距离）
         Node startNode = new Node(start, 0, heuristicMeters(start, end, index), null);
         openSet.add(startNode);
-        nodeMap.put(gridKey(start), startNode);
+        bestG.put(gridKey(start), 0.0);
 
         // closedSet: 已处理节点，不重复访问
         Set<String> closedSet = new HashSet<>();
@@ -782,15 +773,18 @@ public class RouteService {
             Node current = openSet.poll();
             String currentKey = gridKey(current.grid);
 
+            // 惰性更新：该节点 gScore 已过期（已有更优路径找到）→ 跳过
+            if (current.gScore > bestG.getOrDefault(currentKey, Double.MAX_VALUE)) continue;
+
             // 到达终点 → 回溯路径
             if (current.grid.getId().equals(end.getId())) {
                 return reconstructPath(current);
             }
 
-            // 已处理过 → 跳过（可能队列中有旧版本）
+            // 已处理过 → 跳过
             if (!closedSet.add(currentKey)) continue;
 
-            // 遍历 26 个邻接方向
+            // 遍历 6 个面邻接方向
             for (int[] dir : NEIGHBOR_DIRECTIONS) {
                 int ni = current.grid.getIndexLon() + dir[0];
                 int nj = current.grid.getIndexLat() + dir[1];
@@ -820,22 +814,16 @@ public class RouteService {
                 }
                 double tentativeG = current.gScore + moveCost;
 
-                // 更新或创建邻居节点
-                Node neighborNode = nodeMap.get(neighborKey);
-                if (neighborNode == null) {
-                    // 首次发现 → 创建节点并入队
-                    double h = heuristicMeters(neighbor, end, index);
-                    neighborNode = new Node(neighbor, tentativeG, tentativeG + h, current);
-                    openSet.add(neighborNode);
-                    nodeMap.put(neighborKey, neighborNode);
-                } else if (tentativeG < neighborNode.gScore) {
-                    // 找到更优路径 → 更新并重新入队
-                    neighborNode.gScore = tentativeG;
-                    neighborNode.fScore = tentativeG + heuristicMeters(neighbor, end, index);
-                    neighborNode.parent = current;
-                    openSet.remove(neighborNode);
-                    openSet.add(neighborNode);
-                }
+                // 惰性更新：已知更优 gScore → 跳过
+                double knownG = bestG.getOrDefault(neighborKey, Double.MAX_VALUE);
+                if (tentativeG >= knownG) continue;
+
+                // 记录最优 gScore，创建新节点直接入队（无需 remove 旧节点）
+                bestG.put(neighborKey, tentativeG);
+                double h = heuristicMeters(neighbor, end, index);
+                Node neighborNode = new Node(neighbor, tentativeG, tentativeG + h, current);
+                openSet.add(neighborNode);
+
             }
         }
 
