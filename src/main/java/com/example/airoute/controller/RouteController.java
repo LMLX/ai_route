@@ -27,7 +27,6 @@ public class RouteController {
     private final RouteConfig routeConfig;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    private static final char SEPARATOR = 0x01; // SOH 分隔符
 
     public RouteController(RouteService routeService, RouteConfig routeConfig) {
         this.routeService = routeService;
@@ -117,64 +116,52 @@ public class RouteController {
 
     private RouteResult doRoute(List<Grid> noFlyZones, List<com.example.airoute.dto.RouteRule> rules,
                                 GeoPoint start, GeoPoint end, List<GeoPoint> mids, double w, double h) throws IOException {
-        // 1. 收集因素名（从规则列表）
         List<String> factorNames = new ArrayList<>();
-        if (rules != null) {
-            for (var r : rules) {
-                if (!factorNames.contains(r.getFactorName())) factorNames.add(r.getFactorName());
-            }
-        }
-        // 2. 扫描网格得 GridContext
+        if (rules != null) for (var r : rules) if (!factorNames.contains(r.getFactorName())) factorNames.add(r.getFactorName());
+
+        String inputPath = "/Users/jinjiahao/IdeaProjects/ai-route/dim_grid_data1";
+        final double eps = routeConfig.getEps();
+
+        // 第一趟：只收集边界信息
         Set<Double> lonSet = new HashSet<>(), latSet = new HashSet<>();
         double minLon = Double.MAX_VALUE, maxLon = -Double.MAX_VALUE;
         double minLat = Double.MAX_VALUE, maxLat = -Double.MAX_VALUE;
         double minAlt = Double.MAX_VALUE;
+        int totalLines = 0;
 
-
-        String inputPath = "/Users/jinjiahao/IdeaProjects/ai-route/dim_grid_data";
-        List<Grid> grids = new ArrayList<>();
-        ObjectMapper objectMapper = new ObjectMapper();
-        try (BufferedReader reader = Files.newBufferedReader(Paths.get(inputPath), StandardCharsets.UTF_8)) {
+        try (BufferedReader r = Files.newBufferedReader(Paths.get(inputPath), StandardCharsets.UTF_8)) {
             String line;
-            while ((line = reader.readLine()) != null) {
-                String[] parts = line.split(String.valueOf(SEPARATOR));
-                String gridId = parts[0];
-                String centerPointStr = parts[1];
-                // 数据格式: [longitude,latitude,altitude]
-                String[] centerPointArray = centerPointStr.substring(1, centerPointStr.length() - 1).split(",");
-                Grid grid = new Grid();
-                grid.setId(gridId);
-                GeoPoint geoPoint = new GeoPoint();
-                geoPoint.setLongitude(Double.parseDouble(centerPointArray[0]));
-                geoPoint.setLatitude(Double.parseDouble(centerPointArray[1]));
-                geoPoint.setAltitude(Double.parseDouble(centerPointArray[2]));
-                grid.setCenterPoint(geoPoint);
-                grids.add(grid);
+            while ((line = r.readLine()) != null) {
+                String[] c = line.split(",");
+                double lon = Double.parseDouble(c[0]), lat = Double.parseDouble(c[1]), alt = Double.parseDouble(c[2]);
+                lonSet.add(lon); latSet.add(lat);
+                if (lon < minLon) minLon = lon; if (lon > maxLon) maxLon = lon;
+                if (lat < minLat) minLat = lat; if (lat > maxLat) maxLat = lat;
+                if (alt < minAlt) minAlt = alt;
+                totalLines++;
             }
         }
 
-
-        for (Grid g : grids) {
-            double lon = g.getCenterPoint().getLongitude();
-            double lat = g.getCenterPoint().getLatitude();
-            double alt = g.getCenterPoint().getAltitude();
-            lonSet.add(lon); latSet.add(lat);
-            if (lon < minLon) minLon = lon; if (lon > maxLon) maxLon = lon;
-            if (lat < minLat) minLat = lat; if (lat > maxLat) maxLat = lat;
-            if (alt < minAlt) minAlt = alt;
-        }
         double cellLon = lonSet.size() > 1 ? (maxLon - minLon) / (lonSet.size() - 1) : 0.001;
         double cellLat = latSet.size() > 1 ? (maxLat - minLat) / (latSet.size() - 1) : 0.001;
         double cellAlt = 100;
         GridContext ctx = new GridContext(minLon, minLat, minAlt, cellLon, cellLat, cellAlt);
 
-        // 3. 转换
-        return routeService.findShortestRoute(
-                toEncrypted(grids, ctx, factorNames),
-                ctx, factorNames,
-                start, end, mids,
-                toEncrypted(noFlyZones, ctx, factorNames),
-                w, h, rules);
+        // 第二趟：直接创建 EncryptedGrid
+        List<EncryptedGrid> grids = new ArrayList<>(totalLines);
+        try (BufferedReader r = Files.newBufferedReader(Paths.get(inputPath), StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = r.readLine()) != null) {
+                String[] c = line.split(",");
+                int i = (int) Math.round((Double.parseDouble(c[0]) - minLon) / cellLon + eps);
+                int j = (int) Math.round((Double.parseDouble(c[1]) - minLat) / cellLat + eps);
+                int k = (int) Math.round((Double.parseDouble(c[2]) - minAlt) / cellAlt + eps);
+                grids.add(new EncryptedGrid(i, j, k));
+            }
+        }
+
+        return routeService.findShortestRoute(grids, ctx, factorNames,
+                start, end, mids, toEncrypted(noFlyZones, ctx, factorNames), w, h, rules);
     }
 
     private List<EncryptedGrid> toEncrypted(List<Grid> grids, GridContext ctx, List<String> names) {
