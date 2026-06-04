@@ -124,8 +124,19 @@ public class RouteService {
         for (GeoPoint wp : waypointCoords) {
             EncryptedGrid g = findGridByPoint(wp, index, ctx);
             if (g == null) return fail("必经点不在任何网格内: " + wp);
+            System.out.println("[WAYPOINT] " + wp.getLongitude() + "," + wp.getLatitude() + "," + wp.getAltitude()
+                    + " → " + g.locationKey());
             waypointGrids.add(g);
         }
+
+        // DEBUG: 检查终点周围邻居是否存在
+        EncryptedGrid endGrid = waypointGrids.get(waypointGrids.size() - 1);
+        int ei = endGrid.getIndexLon(), ej = endGrid.getIndexLat(), ek = endGrid.getIndexAlt();
+        int missing = 0;
+        for (int[] dir : NEIGHBOR_DIRECTIONS) {
+            if (index.gridMap.get(indexKey(ei + dir[0], ej + dir[1], ek + dir[2])) == null) missing++;
+        }
+        System.out.println("[DEBUG] end " + endGrid.locationKey() + " has " + (6-missing) + "/6 neighbors present, " + missing + " missing");
 
         // 必经点所在禁飞区 → 标记为可通行
         Set<String> passableZones = findPassableZones(waypointCoords, noFlyZones, index, ctx);
@@ -137,6 +148,13 @@ public class RouteService {
         double halfH = routeHeight / 2;
         double minAlt = waypointGrids.stream().mapToDouble(g -> g.centerPoint(ctx).getAltitude()).min().orElse(0) - halfH;
         double maxAlt = waypointGrids.stream().mapToDouble(g -> g.centerPoint(ctx).getAltitude()).max().orElse(0) + halfH;
+        System.out.println("[ALT] minAlt=" + minAlt + " maxAlt=" + maxAlt + " totalGrids=" + grids.size() + " indexSize=" + index.gridMap.size());
+        // 统计各海拔层格子数
+        Map<Integer, Integer> kCounts = new TreeMap<>();
+        for (EncryptedGrid g : grids) {
+            kCounts.merge(g.getIndexAlt(), 1, Integer::sum);
+        }
+        System.out.println("[ALT] k-level distribution: " + kCounts);
 
         // ===== 4. 规则匹配集（用于给匹配格折扣、不匹配格惩罚） =====
         Set<String> ruleMatchIds = new HashSet<>();
@@ -593,10 +611,12 @@ public class RouteService {
         double halfAlt = cellAlt / 2;
 
         Map<String, EncryptedGrid> indexMap = new HashMap<>();
+        int dupes = 0;
         for (EncryptedGrid g : grids) {
-            // i/j/k 已在构造时编码进 bits，直接取用
-            indexMap.put(indexKey(g.i(), g.j(), g.k()), g);
+            String key = indexKey(g.i(), g.j(), g.k());
+            if (indexMap.put(key, g) != null) dupes++;
         }
+        System.out.println("[INDEX] built " + indexMap.size() + " entries, " + dupes + " duplicates");
         return new GridIndex(indexMap, cellLonDeg, cellLatDeg, cellAlt,
                 halfLonDeg, halfLatDeg, halfAlt, metersPerDegLon,
                 ctx.minLon, ctx.minLat, ctx.minAlt);
@@ -708,6 +728,7 @@ public class RouteService {
 
         // closedSet: 已处理节点，不重复访问
         Set<String> closedSet = new HashSet<>();
+        int nodesExpanded = 0;
 
         // 终点索引用作方向引导
         int endI = end.getIndexLon(), endJ = end.getIndexLat(), endK = end.getIndexAlt();
@@ -722,11 +743,13 @@ public class RouteService {
 
             // 到达终点 → 回溯路径
             if (currentKey.equals(gridKey(end))) {
+                System.out.println("[A*] FOUND path, expanded " + nodesExpanded + " nodes");
                 return reconstructPath(current);
             }
 
             // 已处理过 → 跳过
             if (!closedSet.add(currentKey)) continue;
+            nodesExpanded++;
 
             // 方向引导：优先探索指向终点的邻居
             int di = endI - current.grid.getIndexLon();
@@ -780,6 +803,7 @@ public class RouteService {
             }
         }
 
+        System.out.println("[A*] EXHAUSTED queue, expanded " + nodesExpanded + " nodes, closedSet=" + closedSet.size());
         return null; // 无路可达
     }
 

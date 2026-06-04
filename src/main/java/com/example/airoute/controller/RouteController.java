@@ -120,45 +120,56 @@ public class RouteController {
         if (rules != null) for (var r : rules) if (!factorNames.contains(r.getFactorName())) factorNames.add(r.getFactorName());
 
         String inputPath = "/Users/jinjiahao/IdeaProjects/ai-route/dim_grid_data2";
+        final double CELL_LON = 0.001, CELL_LAT = 0.001, CELL_ALT = 100;
         final double eps = routeConfig.getEps();
 
-        // 第一趟：只收集边界信息
-        Set<Double> lonSet = new HashSet<>(), latSet = new HashSet<>();
-        double minLon = Double.MAX_VALUE, maxLon = -Double.MAX_VALUE;
-        double minLat = Double.MAX_VALUE, maxLat = -Double.MAX_VALUE;
-        double minAlt = Double.MAX_VALUE;
-        int totalLines = 0;
+        List<EncryptedGrid> grids = new ArrayList<>();
+        double refLon = 0, refLat = 0, refAlt = 0;
+        double minLon = Double.MAX_VALUE, minLat = Double.MAX_VALUE, minAlt = Double.MAX_VALUE;
+        int minI = 0, minJ = 0, minK = 0;
+        boolean first = true;
 
         try (BufferedReader r = Files.newBufferedReader(Paths.get(inputPath), StandardCharsets.UTF_8)) {
             String line;
             while ((line = r.readLine()) != null) {
-                String[] c = line.split(",");
-                double lon = Double.parseDouble(c[0]), lat = Double.parseDouble(c[1]), alt = Double.parseDouble(c[2]);
-                lonSet.add(lon); latSet.add(lat);
-                if (lon < minLon) minLon = lon; if (lon > maxLon) maxLon = lon;
-                if (lat < minLat) minLat = lat; if (lat > maxLat) maxLat = lat;
+                int c1 = line.indexOf(','), c2 = line.indexOf(',', c1 + 1);
+                double lon = Double.parseDouble(line.substring(0, c1));
+                double lat = Double.parseDouble(line.substring(c1 + 1, c2));
+                double alt = Double.parseDouble(line.substring(c2 + 1));
+
+                if (first) {
+                    refLon = lon; refLat = lat; refAlt = alt;
+                    first = false;
+                }
+
+                int i = (int) Math.round((lon - refLon) / CELL_LON + eps);
+                int j = (int) Math.round((lat - refLat) / CELL_LAT + eps);
+                int k = (int) Math.round((alt - refAlt) / CELL_ALT + eps);
+
+                if (i < minI) minI = i;
+                if (j < minJ) minJ = j;
+                if (k < minK) minK = k;
+                if (lon < minLon) minLon = lon;
+                if (lat < minLat) minLat = lat;
                 if (alt < minAlt) minAlt = alt;
-                totalLines++;
-            }
-        }
 
-        double cellLon = lonSet.size() > 1 ? (maxLon - minLon) / (lonSet.size() - 1) : 0.001;
-        double cellLat = latSet.size() > 1 ? (maxLat - minLat) / (latSet.size() - 1) : 0.001;
-        double cellAlt = 100;
-        GridContext ctx = new GridContext(minLon, minLat, minAlt, cellLon, cellLat, cellAlt);
-
-        // 第二趟：创建 EncryptedGrid
-        List<EncryptedGrid> grids = new ArrayList<>(totalLines);
-        try (BufferedReader r = Files.newBufferedReader(Paths.get(inputPath), StandardCharsets.UTF_8)) {
-            String line;
-            while ((line = r.readLine()) != null) {
-                String[] c = line.split(",");
-                int i = (int) Math.round((Double.parseDouble(c[0]) - minLon) / cellLon + eps);
-                int j = (int) Math.round((Double.parseDouble(c[1]) - minLat) / cellLat + eps);
-                int k = (int) Math.round((Double.parseDouble(c[2]) - minAlt) / cellAlt + eps);
                 grids.add(new EncryptedGrid(i, j, k));
             }
         }
+
+        // 如果索引出现负数，整体平移到非负
+        if (minI < 0 || minJ < 0 || minK < 0) {
+            for (EncryptedGrid g : grids) {
+                if (minI < 0) g.setIndexLon(g.getIndexLon() - minI);
+                if (minJ < 0) g.setIndexLat(g.getIndexLat() - minJ);
+                if (minK < 0) g.setIndexAlt(g.getIndexAlt() - minK);
+            }
+            if (minI < 0) refLon += minI * CELL_LON;
+            if (minJ < 0) refLat += minJ * CELL_LAT;
+            if (minK < 0) refAlt += minK * CELL_ALT;
+        }
+
+        GridContext ctx = new GridContext(refLon, refLat, refAlt, CELL_LON, CELL_LAT, CELL_ALT);
 
         return routeService.findShortestRoute(grids, ctx, factorNames,
                 start, end, mids, toEncrypted(noFlyZones, ctx, factorNames), w, h, rules);
