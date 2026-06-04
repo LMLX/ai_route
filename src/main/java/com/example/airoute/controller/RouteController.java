@@ -119,7 +119,7 @@ public class RouteController {
         List<String> factorNames = new ArrayList<>();
         if (rules != null) for (var r : rules) if (!factorNames.contains(r.getFactorName())) factorNames.add(r.getFactorName());
 
-        String inputPath = "/Users/jinjiahao/IdeaProjects/ai-route/dim_grid_data1";
+        String inputPath = "/Users/jinjiahao/IdeaProjects/ai-route/dim_grid_data2";
         final double eps = routeConfig.getEps();
 
         // 第一趟：只收集边界信息

@@ -65,9 +65,13 @@ public class GridDataConverter {
 
         long t1 = System.currentTimeMillis();
         String inputPath = "/Users/jinjiahao/IdeaProjects/ai-route/dim_grid_data";
+        String outPath = "/Users/jinjiahao/IdeaProjects/ai-route/dim_grid_data2";
         List<Grid> grids = new ArrayList<>();
         ObjectMapper objectMapper = new ObjectMapper();
-        try (BufferedReader reader = Files.newBufferedReader(Paths.get(inputPath), StandardCharsets.UTF_8)) {
+        try (BufferedReader reader = Files.newBufferedReader(Paths.get(inputPath), StandardCharsets.UTF_8);
+             BufferedWriter writer = Files.newBufferedWriter(Paths.get(outPath), StandardCharsets.UTF_8)
+
+        ) {
             String line;
             while ((line = reader.readLine()) != null) {
                 String[] parts = line.split(String.valueOf(SEPARATOR));
@@ -83,7 +87,12 @@ public class GridDataConverter {
                 geoPoint.setAltitude(Double.parseDouble(centerPointArray[2]));
                 grid.setCenterPoint(geoPoint);
                 grids.add(grid);
+
+                writer.write(centerPointArray[0]+","+centerPointArray[1]+","+centerPointArray[2]);
+                writer.newLine();
+
             }
+            writer.flush();
         }
         System.out.println(grids.size());
         // 浅大小：ArrayList 对象本身 + 底层数组引用的“槽位”，但不包含数组元素指向的 Integer 对象

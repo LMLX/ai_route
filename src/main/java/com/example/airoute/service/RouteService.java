@@ -142,8 +142,8 @@ public class RouteService {
         Set<String> ruleMatchIds = new HashSet<>();
         if (hasRules) {
             for (EncryptedGrid g : grids) {
-                if (routeConfig.isStrictNoFlyZone() && noFlyData.gridZoneMap.containsKey(g.getId())) continue;
-                if (rules.stream().anyMatch(r -> evaluateRule(g, r, factorNames))) ruleMatchIds.add(g.getId());
+                if (routeConfig.isStrictNoFlyZone() && noFlyData.gridZoneMap.containsKey(g.locationKey())) continue;
+                if (rules.stream().anyMatch(r -> evaluateRule(g, r, factorNames))) ruleMatchIds.add(g.locationKey());
             }
         }
 
@@ -361,7 +361,7 @@ public class RouteService {
         for (EncryptedGrid nfz : noFlyZones) {
             EncryptedGrid full = index.gridMap.get(indexKey(nfz.i(), nfz.j(), nfz.k()));
             if (full != null) {
-                gridZoneMap.computeIfAbsent(full.getId(), k -> new LinkedHashSet<>()).add(full.getId());
+                gridZoneMap.computeIfAbsent(full.locationKey(), k -> new LinkedHashSet<>()).add(full.locationKey());
             }
         }
         return new NoFlyData(gridZoneMap);
@@ -377,7 +377,7 @@ public class RouteService {
         for (GeoPoint wp : waypoints) {
             for (EncryptedGrid nfz : noFlyZones) {
                 if (isPointInGrid(nfz, wp, index, ctx)) {
-                    passable.add(nfz.getId());
+                    passable.add(nfz.locationKey());
                     break;
                 }
             }
@@ -411,7 +411,7 @@ public class RouteService {
 
         // 必经点永远豁免；入队条件：自身被封锁 或 被封锁邻居包围（防止孤立）
         for (EncryptedGrid wp : waypointGrids) {
-            exempt.add(wp.getId());
+            exempt.add(wp.locationKey());
             if (isGridBlocked(wp, noFlyData, passableZones, factorNames)) {
                 queue.add(wp);
             } else {
@@ -438,12 +438,10 @@ public class RouteService {
                 int nk = current.getIndexAlt() + dir[2];
                 EncryptedGrid neighbor = index.gridMap.get(indexKey(ni, nj, nk));
 
-                if (neighbor == null || exempt.contains(neighbor.getId())) continue;
+                if (neighbor == null || exempt.contains(neighbor.locationKey())) continue;
 
-                // 只有被封锁的网格才纳入豁免扩散
-                // "被封锁" = 禁飞区未放行 OR 因素=0
                 if (isGridBlocked(neighbor, noFlyData, passableZones, factorNames)) {
-                    exempt.add(neighbor.getId());
+                    exempt.add(neighbor.locationKey());
                     queue.add(neighbor);
                 }
                 // 不被封锁 → 不扩散，这方向到此为止
@@ -466,8 +464,7 @@ public class RouteService {
      * 必经点豁免检查在调用方 {@link #isGridPassable} 中处理。
      */
     private boolean isGridBlocked(EncryptedGrid g, NoFlyData noFlyData, Set<String> passableZones, List<String> factorNames) {
-        // 禁飞区检查：属于某个未放行的禁飞区 → 封锁
-        Set<String> zones = noFlyData.gridZoneMap.get(g.getId());
+        Set<String> zones = noFlyData.gridZoneMap.get(g.locationKey());
         if (zones != null && !zones.isEmpty()) {
             boolean inPassable = false;
             for (String zid : zones) {
@@ -475,7 +472,6 @@ public class RouteService {
             }
             if (!inPassable) return true;
         }
-        // 因素检查：任一因素=0 → 封锁
         return !hasAllFactorsPassable(g, factorNames);
     }
 
@@ -496,9 +492,9 @@ public class RouteService {
      */
     private boolean isGridPassable(EncryptedGrid g, NoFlyData noFlyData, Set<String> passableZones,
                                     Set<String> exemptGridIds, List<String> factorNames) {
-        if (exemptGridIds.contains(g.getId())) return true;
+        if (exemptGridIds.contains(g.locationKey())) return true;
 
-        Set<String> zones = noFlyData.gridZoneMap.get(g.getId());
+        Set<String> zones = noFlyData.gridZoneMap.get(g.locationKey());
         if (zones != null && !zones.isEmpty()) {
             boolean inPassable = false;
             for (String zoneId : zones) {
@@ -725,7 +721,7 @@ public class RouteService {
             if (current.gScore > bestG.getOrDefault(currentKey, Double.MAX_VALUE)) continue;
 
             // 到达终点 → 回溯路径
-            if (current.grid.getId().equals(end.getId())) {
+            if (currentKey.equals(gridKey(end))) {
                 return reconstructPath(current);
             }
 
@@ -752,7 +748,7 @@ public class RouteService {
                 if (neighbor == null) continue;
                 // 高度不在走廊范围且不在豁免集 → 跳过
                 double alt = neighbor.centerPoint(ctx).getAltitude();
-                if (!exemptGridIds.contains(neighbor.getId())
+                if (!exemptGridIds.contains(neighbor.locationKey())
                         && (alt < minAltitude || alt > maxAltitude)) continue;
                 // 禁飞区/因素 → 跳过
                 if (!isGridPassable(neighbor, noFlyData, passableZones, exemptGridIds, factorNames)) continue;
@@ -766,7 +762,7 @@ public class RouteService {
                 double moveCost = baseDist + penalty;
                 // 规则代价：匹配格折扣，不匹配格加倍（用乘数避免负数）
                 if (!ruleMatchIds.isEmpty()) {
-                    double mult = ruleMatchIds.contains(neighbor.getId()) ? 0.05 : 3.0;
+                    double mult = ruleMatchIds.contains(neighbor.locationKey()) ? 0.05 : 3.0;
                     moveCost = baseDist * mult + penalty;
                 }
                 double tentativeG = current.gScore + moveCost;
@@ -879,7 +875,7 @@ public class RouteService {
     }
 
     private String gridKey(EncryptedGrid g) {
-        return Long.toHexString(g.getCompressed());
+        return g.locationKey();
     }
 
     private RouteResult fail(String msg) {
