@@ -111,11 +111,6 @@ public class EncryptedGrid {
         return p;
     }
 
-    // ====== 上下文 ======
-
-    public record GridContext(double minLon, double minLat, double minAlt,
-                               double cellLon, double cellLat, double cellAlt) {}
-
     // ====== 索引读写 ======
 
     @JsonIgnore
