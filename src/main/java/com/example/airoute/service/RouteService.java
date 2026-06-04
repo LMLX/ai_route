@@ -6,7 +6,6 @@ import com.example.airoute.dto.RouteRule;
 import com.example.airoute.model.EncryptedGrid;
 import com.example.airoute.model.GridContext;
 import com.example.airoute.model.GeoPoint;
-import com.example.airoute.model.Grid;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -107,7 +106,7 @@ public class RouteService {
         // ===== 1. 构建 3D 空间索引 =====
         // 将网格按平均尺寸分配到整数索引 (i,j,k)，
         // 存入 HashMap 实现 O(1) 邻接查找。
-        GridIndex index = buildGridIndex(grids, ctx, factorNames);
+        GridIndex index = buildGridIndex(grids, ctx);
 
         // ===== 2. 构建禁飞区数据 =====
         // zoneGridMap: zoneId → {属于该区的网格ID}
@@ -123,7 +122,7 @@ public class RouteService {
         // 每个必经点定位到具体网格
         List<EncryptedGrid> waypointGrids = new ArrayList<>();
         for (GeoPoint wp : waypointCoords) {
-            EncryptedGrid g = findGridByPoint(grids, wp, index, ctx);
+            EncryptedGrid g = findGridByPoint(wp, index, ctx);
             if (g == null) return fail("必经点不在任何网格内: " + wp);
             waypointGrids.add(g);
         }
@@ -354,35 +353,28 @@ public class RouteService {
      * 如果未来需要多格合成一个大 zone，可给 Grid 加 groupId 字段。</p>
      */
     private NoFlyData buildNoFlyData(List<EncryptedGrid> noFlyZones, GridIndex index, GridContext ctx) {
-        Map<String, Set<String>> zoneGridMap = new LinkedHashMap<>();
         Map<String, Set<String>> gridZoneMap = new HashMap<>();
 
         if (noFlyZones == null || noFlyZones.isEmpty()) {
-            return new NoFlyData(zoneGridMap, gridZoneMap);
+            return new NoFlyData(gridZoneMap);
         }
 
-        // 先建全量网格 ID 集合，用于精确匹配
         Set<String> fullGridIds = index.gridMap.values().stream()
                 .map(EncryptedGrid::getId).collect(Collectors.toSet());
 
         for (EncryptedGrid nfz : noFlyZones) {
-            String matchedGridId = null;
-
-            // 1. 精确 ID 匹配
+            String matchedGridId;
             if (fullGridIds.contains(nfz.getId())) {
                 matchedGridId = nfz.getId();
             } else {
-                // 2. 坐标兜底：O(1) 索引反算（替代 O(n) 遍历）
                 EncryptedGrid matched = findGridByIndex(nfz.centerPoint(ctx), index, ctx);
-                if (matched != null) matchedGridId = matched.getId();
+                matchedGridId = matched != null ? matched.getId() : null;
             }
-
             if (matchedGridId != null) {
-                zoneGridMap.put(matchedGridId, new HashSet<>(List.of(matchedGridId)));
                 gridZoneMap.computeIfAbsent(matchedGridId, k -> new LinkedHashSet<>()).add(matchedGridId);
             }
         }
-        return new NoFlyData(zoneGridMap, gridZoneMap);
+        return new NoFlyData(gridZoneMap);
     }
 
     /**
@@ -604,33 +596,13 @@ public class RouteService {
      *   <li>存入 HashMap：key="i_j_k" → Grid（O(1) 查找）</li>
      * </ol>
      */
-    private GridIndex buildGridIndex(List<EncryptedGrid> grids, GridContext ctx, List<String> factorNames) {
-        // 从网格真实数据计算实际步长（兼容测试和实际数据）
-        double minCenterLon = ctx.minLon;
-        double minCenterLat = ctx.minLat;
-        double minCenterAlt = ctx.minAlt;;
-            // anchors taken from ctx
+    private GridIndex buildGridIndex(List<EncryptedGrid> grids, GridContext ctx) {
+        double metersPerDegLon = METERS_PER_DEGREE_LAT * Math.cos(Math.toRadians(ctx.minLat));
 
-        double avgCenterLat = (ctx.minLat + ctx.minLat) / 2;
-        double metersPerDegLon = METERS_PER_DEGREE_LAT * Math.cos(Math.toRadians(avgCenterLat));
-
-        // 唯一经/纬度数（3D 网格不受高度层数干扰）
-        Set<Double> ul = new HashSet<>(), ut = new HashSet<>();
-        for (EncryptedGrid g : grids) {
-            ul.add(g.centerPoint(ctx).getLongitude());
-            ut.add(g.centerPoint(ctx).getLatitude());
-        }
-        int cols = ul.size(), rows = ut.size();
-
-        double cellLonDeg = ctx.cellLon;
-        double cellLatDeg = ctx.cellLat;
-        double cellAlt = ctx.cellAlt;
-
-        // 防止除零
+        double cellLonDeg = ctx.cellLon, cellLatDeg = ctx.cellLat, cellAlt = ctx.cellAlt;
         if (cellLonDeg < 1e-12) cellLonDeg = 0.001;
         if (cellLatDeg < 1e-12) cellLatDeg = 0.001;
 
-        // 半格尺寸（用于 isPointInGrid 包围盒判断）
         double halfLonDeg = cellLonDeg / 2;
         double halfLatDeg = cellLatDeg / 2;
         double halfAlt = cellAlt / 2;
@@ -640,11 +612,9 @@ public class RouteService {
             // i/j/k 已在构造时编码进 bits，直接取用
             indexMap.put(indexKey(g.i(), g.j(), g.k()), g);
         }
-
-        for (EncryptedGrid eg : grids) eg.seal(factorNames);
         return new GridIndex(indexMap, cellLonDeg, cellLatDeg, cellAlt,
                 halfLonDeg, halfLatDeg, halfAlt, metersPerDegLon,
-                minCenterLon, minCenterLat, minCenterAlt);
+                ctx.minLon, ctx.minLat, ctx.minAlt);
     }
 
     private String indexKey(int i, int j, int k) {
@@ -664,9 +634,8 @@ public class RouteService {
      * </ol>
      * @return 找到的网格，或 null（坐标完全不在任何网格范围内）
      */
-    private EncryptedGrid findGridByPoint(List<EncryptedGrid> grids, GeoPoint point, GridIndex index, GridContext ctx) {
+    private EncryptedGrid findGridByPoint(GeoPoint point, GridIndex index, GridContext ctx) {
         final double EPS = routeConfig.getEps();
-        // 1. O(1) 索引反算
         int iLon = (int) Math.round((point.getLongitude() - index.anchorLon) / index.cellLonDeg + EPS);
         int iLat = (int) Math.round((point.getLatitude() - index.anchorLat) / index.cellLatDeg + EPS);
         int iAlt = (int) Math.round((point.getAltitude() - index.anchorAlt) / index.cellAlt + EPS);
@@ -674,16 +643,14 @@ public class RouteService {
         EncryptedGrid g = index.gridMap.get(indexKey(iLon, iLat, iAlt));
         if (g != null && isPointInGrid(g, point, index, ctx)) return g;
 
-        // 2. 兜底：搜索 6 面邻居（处理浮点舍入边界）
         for (int[] dir : NEIGHBOR_DIRECTIONS) {
             g = index.gridMap.get(indexKey(iLon + dir[0], iLat + dir[1], iAlt + dir[2]));
             if (g != null && isPointInGrid(g, point, index, ctx)) return g;
         }
 
-        // 3. 极端兜底：遍历最近中心点（坐标完全不在网格空间内）
         EncryptedGrid nearest = null;
         double minDist = Double.MAX_VALUE;
-        for (EncryptedGrid grid : grids) {
+        for (EncryptedGrid grid : index.gridMap.values()) {
             double dist = grid.centerPoint(ctx).distanceTo(point);
             if (dist < minDist) { minDist = dist; nearest = grid; }
         }
@@ -982,17 +949,12 @@ public class RouteService {
     }
 
     /**
-     * 禁飞区双向映射数据。
-     * <ul>
-     *   <li><b>zoneGridMap</b>: zoneId → {该区内所有 gridId}</li>
-     *   <li><b>gridZoneMap</b>: gridId → {该网格所属的 zoneId...}（支持嵌套）</li>
-     * </ul>
+     * 禁飞区映射：gridId → {该网格所属的 zoneId...}
      */
     private static class NoFlyData {
-        Map<String, Set<String>> zoneGridMap;
         Map<String, Set<String>> gridZoneMap;
-        NoFlyData(Map<String, Set<String>> zoneGridMap, Map<String, Set<String>> gridZoneMap) {
-            this.zoneGridMap = zoneGridMap; this.gridZoneMap = gridZoneMap;
+        NoFlyData(Map<String, Set<String>> gridZoneMap) {
+            this.gridZoneMap = gridZoneMap;
         }
     }
 }

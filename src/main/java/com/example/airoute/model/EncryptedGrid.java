@@ -127,9 +127,4 @@ public class EncryptedGrid {
     public void setIndexLat(int v) { bits = (bits & ~(0x7FFFL  << 32)) | ((v & 0x7FFFL)  << 32); }
     @JsonIgnore
     public void setIndexAlt(int v) { bits = (bits & ~(0x1FL    << 27)) | ((v & 0x1FL)    << 27); }
-
-    @JsonIgnore
-    public void seal(List<String> nameList) {
-        this.bits = pack(getIndexLon(), getIndexLat(), getIndexAlt(), nameList, factors(nameList));
-    }
 }

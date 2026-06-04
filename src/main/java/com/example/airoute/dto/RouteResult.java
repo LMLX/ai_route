@@ -2,7 +2,6 @@ package com.example.airoute.dto;
 
 import com.example.airoute.model.GeoPoint;
 import com.example.airoute.model.EncryptedGrid;
-import com.example.airoute.model.Grid;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;

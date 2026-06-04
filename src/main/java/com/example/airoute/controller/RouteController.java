@@ -147,7 +147,7 @@ public class RouteController {
         double cellAlt = 100;
         GridContext ctx = new GridContext(minLon, minLat, minAlt, cellLon, cellLat, cellAlt);
 
-        // 第二趟：直接创建 EncryptedGrid
+        // 第二趟：创建 EncryptedGrid
         List<EncryptedGrid> grids = new ArrayList<>(totalLines);
         try (BufferedReader r = Files.newBufferedReader(Paths.get(inputPath), StandardCharsets.UTF_8)) {
             String line;

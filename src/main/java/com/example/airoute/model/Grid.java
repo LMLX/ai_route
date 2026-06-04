@@ -26,10 +26,4 @@ public class Grid {
      * 任一因素为 0 → 该网格默认不可通行（必经点网格除外）
      */
     private Map<String, Integer> factors;
-
-    // ====== 计算得出的 3D 索引，用于 O(1) 邻接查找 ======
-
-    private int indexLon;
-    private int indexLat;
-    private int indexAlt;
 }
