@@ -29,4 +29,7 @@ public class RouteConfig {
 
     /** 浮点舍入保护 epsilon，避免边界值舍入错误 */
     private double eps = 1e-8;
+
+    /** 严格禁飞模式：禁飞区网格不计入规则覆盖率（途经点豁免除外），默认 true */
+    private boolean strictNoFlyZone = true;
 }

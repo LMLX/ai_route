@@ -111,7 +111,7 @@ public class RouteService {
         // ===== 2. 构建禁飞区数据 =====
         // zoneGridMap: zoneId → {属于该区的网格ID}
         // gridZoneMap: gridId → {该网格所属的zoneId...}(支持嵌套)
-        NoFlyData noFlyData = buildNoFlyData(noFlyZones, index, ctx);
+        NoFlyData noFlyData = buildNoFlyData(noFlyZones, index);
 
         // ===== 3. 构建必经点序列 =====
         List<GeoPoint> waypointCoords = new ArrayList<>();
@@ -142,6 +142,7 @@ public class RouteService {
         Set<String> ruleMatchIds = new HashSet<>();
         if (hasRules) {
             for (EncryptedGrid g : grids) {
+                if (routeConfig.isStrictNoFlyZone() && noFlyData.gridZoneMap.containsKey(g.getId())) continue;
                 if (rules.stream().anyMatch(r -> evaluateRule(g, r, factorNames))) ruleMatchIds.add(g.getId());
             }
         }
@@ -352,26 +353,15 @@ public class RouteService {
      * <p>每个禁飞区条目自成一个 zone（zoneId = 其 gridId）。
      * 如果未来需要多格合成一个大 zone，可给 Grid 加 groupId 字段。</p>
      */
-    private NoFlyData buildNoFlyData(List<EncryptedGrid> noFlyZones, GridIndex index, GridContext ctx) {
+    private NoFlyData buildNoFlyData(List<EncryptedGrid> noFlyZones, GridIndex index) {
         Map<String, Set<String>> gridZoneMap = new HashMap<>();
-
         if (noFlyZones == null || noFlyZones.isEmpty()) {
             return new NoFlyData(gridZoneMap);
         }
-
-        Set<String> fullGridIds = index.gridMap.values().stream()
-                .map(EncryptedGrid::getId).collect(Collectors.toSet());
-
         for (EncryptedGrid nfz : noFlyZones) {
-            String matchedGridId;
-            if (fullGridIds.contains(nfz.getId())) {
-                matchedGridId = nfz.getId();
-            } else {
-                EncryptedGrid matched = findGridByIndex(nfz.centerPoint(ctx), index, ctx);
-                matchedGridId = matched != null ? matched.getId() : null;
-            }
-            if (matchedGridId != null) {
-                gridZoneMap.computeIfAbsent(matchedGridId, k -> new LinkedHashSet<>()).add(matchedGridId);
+            EncryptedGrid full = index.gridMap.get(indexKey(nfz.i(), nfz.j(), nfz.k()));
+            if (full != null) {
+                gridZoneMap.computeIfAbsent(full.getId(), k -> new LinkedHashSet<>()).add(full.getId());
             }
         }
         return new NoFlyData(gridZoneMap);
@@ -506,10 +496,8 @@ public class RouteService {
      */
     private boolean isGridPassable(EncryptedGrid g, NoFlyData noFlyData, Set<String> passableZones,
                                     Set<String> exemptGridIds, List<String> factorNames) {
-        // 豁免集最高优先级
         if (exemptGridIds.contains(g.getId())) return true;
 
-        // 禁飞区检查
         Set<String> zones = noFlyData.gridZoneMap.get(g.getId());
         if (zones != null && !zones.isEmpty()) {
             boolean inPassable = false;
@@ -519,12 +507,13 @@ public class RouteService {
             if (!inPassable) return false;
         }
 
-        // 因素检查
         return hasAllFactorsPassable(g, factorNames);
     }
 
-    /** @return true 如果网格所有因素值都 > 0 */
+    /** @return true 如果网格所有因素值都 > 0（无因素数据视为无障碍） */
     private boolean hasAllFactorsPassable(EncryptedGrid g, List<String> factorNames) {
+        // bits 0-26 全是 0 → 没有打包因素 → 视为无障碍
+        if ((g.getCompressed() & 0x7FFFFFFL) == 0) return true;
         Map<String, Integer> factors = g.factors(factorNames);
         if (factors == null || factors.isEmpty()) return true;
         for (int val : factors.values()) {
@@ -659,27 +648,6 @@ public class RouteService {
     }
 
     /**
-     * 纯索引反算（O(1)）：根据坐标直接用锚点+步长反算索引 → HashMap 查找。
-     * 不含 O(n) 兜底，用于禁飞区坐标匹配等场景（不需要 grids 列表）。
-     */
-    private EncryptedGrid findGridByIndex(GeoPoint point, GridIndex index, GridContext ctx) {
-        final double EPS = routeConfig.getEps();
-        int iLon = (int) Math.round((point.getLongitude() - index.anchorLon) / index.cellLonDeg + EPS);
-        int iLat = (int) Math.round((point.getLatitude() - index.anchorLat) / index.cellLatDeg + EPS);
-        int iAlt = (int) Math.round((point.getAltitude() - index.anchorAlt) / index.cellAlt + EPS);
-
-        EncryptedGrid g = index.gridMap.get(indexKey(iLon, iLat, iAlt));
-        if (g != null && isPointInGrid(g, point, index, ctx)) return g;
-
-        // 兜底：搜索 6 面邻居（处理浮点舍入边界）
-        for (int[] dir : NEIGHBOR_DIRECTIONS) {
-            g = index.gridMap.get(indexKey(iLon + dir[0], iLat + dir[1], iAlt + dir[2]));
-            if (g != null && isPointInGrid(g, point, index, ctx)) return g;
-        }
-        return null;
-    }
-
-    /**
      * 判断点是否在网格包围盒内（中心点 ± 半格尺寸）
      */
     private boolean isPointInGrid(EncryptedGrid grid, GeoPoint point, GridIndex index, GridContext ctx) {
@@ -745,6 +713,9 @@ public class RouteService {
         // closedSet: 已处理节点，不重复访问
         Set<String> closedSet = new HashSet<>();
 
+        // 终点索引用作方向引导
+        int endI = end.getIndexLon(), endJ = end.getIndexLat(), endK = end.getIndexAlt();
+
         while (!openSet.isEmpty()) {
             // 取出 fScore 最小的节点
             Node current = openSet.poll();
@@ -761,8 +732,17 @@ public class RouteService {
             // 已处理过 → 跳过
             if (!closedSet.add(currentKey)) continue;
 
-            // 遍历 6 个面邻接方向
-            for (int[] dir : NEIGHBOR_DIRECTIONS) {
+            // 方向引导：优先探索指向终点的邻居
+            int di = endI - current.grid.getIndexLon();
+            int dj = endJ - current.grid.getIndexLat();
+            int dk = endK - current.grid.getIndexAlt();
+            int[][] orderedDirs = NEIGHBOR_DIRECTIONS.clone();
+            Arrays.sort(orderedDirs, (a, b) -> Integer.compare(
+                    b[0]*di + b[1]*dj + b[2]*dk,
+                    a[0]*di + a[1]*dj + a[2]*dk));
+
+            // 遍历 6 个面邻接方向（按目标方向优先级排序）
+            for (int[] dir : orderedDirs) {
                 int ni = current.grid.getIndexLon() + dir[0];
                 int nj = current.grid.getIndexLat() + dir[1];
                 int nk = current.grid.getIndexAlt() + dir[2];
