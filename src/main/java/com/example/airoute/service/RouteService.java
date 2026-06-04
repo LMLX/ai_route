@@ -3,6 +3,8 @@ package com.example.airoute.service;
 import com.example.airoute.config.RouteConfig;
 import com.example.airoute.dto.RouteResult;
 import com.example.airoute.dto.RouteRule;
+import com.example.airoute.model.EncryptedGrid;
+import com.example.airoute.model.GridContext;
 import com.example.airoute.model.GeoPoint;
 import com.example.airoute.model.Grid;
 import org.springframework.stereotype.Service;
@@ -89,14 +91,10 @@ public class RouteService {
      *
      * @return 路径结果（成功/失败 + 路径 + 距离 + 评分 + 各规则覆盖率）
      */
-    public RouteResult findShortestRoute(List<Grid> grids,
-                                         GeoPoint startPoint,
-                                         GeoPoint endPoint,
-                                         List<GeoPoint> midPoints,
-                                         List<Grid> noFlyZones,
-                                         double routeWidth,
-                                         double routeHeight,
-                                         List<RouteRule> rules) {
+    public RouteResult findShortestRoute(List<EncryptedGrid> grids, GridContext ctx, List<String> factorNames,
+                                         GeoPoint startPoint, GeoPoint endPoint, List<GeoPoint> midPoints,
+                                         List<EncryptedGrid> noFlyZones,
+                                         double routeWidth, double routeHeight, List<RouteRule> rules) {
         // ===== 0. 前置校验 =====
         if (grids == null || grids.isEmpty()) {
             return fail("网格数据为空");
@@ -109,12 +107,12 @@ public class RouteService {
         // ===== 1. 构建 3D 空间索引 =====
         // 将网格按平均尺寸分配到整数索引 (i,j,k)，
         // 存入 HashMap 实现 O(1) 邻接查找。
-        GridIndex index = buildGridIndex(grids);
+        GridIndex index = buildGridIndex(grids, ctx, factorNames);
 
         // ===== 2. 构建禁飞区数据 =====
         // zoneGridMap: zoneId → {属于该区的网格ID}
         // gridZoneMap: gridId → {该网格所属的zoneId...}(支持嵌套)
-        NoFlyData noFlyData = buildNoFlyData(noFlyZones, index);
+        NoFlyData noFlyData = buildNoFlyData(noFlyZones, index, ctx);
 
         // ===== 3. 构建必经点序列 =====
         List<GeoPoint> waypointCoords = new ArrayList<>();
@@ -123,29 +121,29 @@ public class RouteService {
         waypointCoords.add(endPoint);
 
         // 每个必经点定位到具体网格
-        List<Grid> waypointGrids = new ArrayList<>();
+        List<EncryptedGrid> waypointGrids = new ArrayList<>();
         for (GeoPoint wp : waypointCoords) {
-            Grid g = findGridByPoint(grids, wp, index);
+            EncryptedGrid g = findGridByPoint(grids, wp, index, ctx);
             if (g == null) return fail("必经点不在任何网格内: " + wp);
             waypointGrids.add(g);
         }
 
         // 必经点所在禁飞区 → 标记为可通行
-        Set<String> passableZones = findPassableZones(waypointCoords, noFlyZones, index);
+        Set<String> passableZones = findPassableZones(waypointCoords, noFlyZones, index, ctx);
 
         // BFS 洪泛：必经点所在连续封锁区 → 全豁免
-        Set<String> exemptGridIds = computeExemptRegion(waypointGrids, index, noFlyData, passableZones);
+        Set<String> exemptGridIds = computeExemptRegion(waypointGrids, index, noFlyData, passableZones, factorNames);
 
         // 高度走廊：以必经点海拔为中心，±routeHeight/2
         double halfH = routeHeight / 2;
-        double minAlt = waypointGrids.stream().mapToDouble(g -> g.getCenterPoint().getAltitude()).min().orElse(0) - halfH;
-        double maxAlt = waypointGrids.stream().mapToDouble(g -> g.getCenterPoint().getAltitude()).max().orElse(0) + halfH;
+        double minAlt = waypointGrids.stream().mapToDouble(g -> g.centerPoint(ctx).getAltitude()).min().orElse(0) - halfH;
+        double maxAlt = waypointGrids.stream().mapToDouble(g -> g.centerPoint(ctx).getAltitude()).max().orElse(0) + halfH;
 
         // ===== 4. 规则匹配集（用于给匹配格折扣、不匹配格惩罚） =====
         Set<String> ruleMatchIds = new HashSet<>();
         if (hasRules) {
-            for (Grid g : grids) {
-                if (rules.stream().anyMatch(r -> evaluateRule(g, r))) ruleMatchIds.add(g.getId());
+            for (EncryptedGrid g : grids) {
+                if (rules.stream().anyMatch(r -> evaluateRule(g, r, factorNames))) ruleMatchIds.add(g.getId());
             }
         }
 
@@ -164,14 +162,14 @@ public class RouteService {
             double effectivePenalty = penaltyFactor * (1 + retry * 2); // 每次重试惩罚×3/5/7...
 
             // 5.2 逐段 A* 搜索：[start→mid1], [mid1→mid2], ..., [midN→end]
-            List<List<Grid>> segments = new ArrayList<>();
+            List<List<EncryptedGrid>> segments = new ArrayList<>();
             boolean segmentFailed = false;
             for (int i = 0; i < waypointGrids.size() - 1; i++) {
-                List<Grid> seg = aStarSearch(index,
+                List<EncryptedGrid> seg = aStarSearch(index,
                         waypointGrids.get(i), waypointGrids.get(i + 1),
                         minAlt, maxAlt, noFlyData, passableZones,
                         exemptGridIds, weights, effectivePenalty,
-                        ruleMatchIds);
+                        ruleMatchIds, ctx, factorNames);
                 if (seg == null) { segmentFailed = true; break; }
                 segments.add(seg);
             }
@@ -183,21 +181,21 @@ public class RouteService {
             }
 
             // 5.3 合并多段 + 走廊扩展
-            List<Grid> fullPath = mergeSegments(segments);
+            List<EncryptedGrid> fullPath = mergeSegments(segments);
             if (widthInGrids > 1) {
                 fullPath = expandCorridor(index, fullPath, widthInGrids, minAlt, maxAlt,
-                        noFlyData, passableZones, exemptGridIds);
+                        noFlyData, passableZones, exemptGridIds, factorNames, ctx);
             }
 
             // 5.4 计算结果指标
-            List<GeoPoint> waypoints = fullPath.stream().map(Grid::getCenterPoint).collect(Collectors.toList());
+            List<GeoPoint> waypoints = fullPath.stream().map(g -> g.centerPoint(ctx)).collect(Collectors.toList());
             double totalDistance = calculatePathDistance(waypoints, index);
-            double avgScore = computeAvgScore(fullPath, weights);
+            double avgScore = computeAvgScore(fullPath, weights, factorNames);
 
             // 5.5 评估所有规则覆盖率
             // ruleCoverages: {factorName → 该因素在路径上的达标占比}
             Map<String, Double> ruleCoverages = hasRules
-                    ? evaluateRuleCoverages(fullPath, rules) : new LinkedHashMap<>();
+                    ? evaluateRuleCoverages(fullPath, rules, factorNames) : new LinkedHashMap<>();
             double minCoverage = ruleCoverages.isEmpty() ? 1.0
                     : ruleCoverages.values().stream().min(Double::compare).orElse(1.0);
 
@@ -285,14 +283,14 @@ public class RouteService {
      *
      * @return {factorName → 覆盖率(0~1)}
      */
-    private Map<String, Double> evaluateRuleCoverages(List<Grid> path, List<RouteRule> rules) {
+    private Map<String, Double> evaluateRuleCoverages(List<EncryptedGrid> path, List<RouteRule> rules, List<String> factorNames) {
         Map<String, Double> result = new LinkedHashMap<>();
         if (path.isEmpty() || rules == null) return result;
 
         for (RouteRule rule : rules) {
             int matched = 0;
-            for (Grid g : path) {
-                if (evaluateRule(g, rule)) matched++;
+            for (EncryptedGrid g : path) {
+                if (evaluateRule(g, rule, factorNames)) matched++;
             }
             result.put(rule.getFactorName(), (double) matched / path.size());
         }
@@ -302,8 +300,8 @@ public class RouteService {
     /**
      * 单规则判定：网格因素值是否落在 [minThreshold, maxThreshold] 区间内。
      */
-    private boolean evaluateRule(Grid g, RouteRule rule) {
-        Map<String, Integer> factors = g.getFactors();
+    private boolean evaluateRule(EncryptedGrid g, RouteRule rule, List<String> factorNames) {
+        Map<String, Integer> factors = g.factors(factorNames);
         if (factors == null) return false;
         Integer val = factors.get(rule.getFactorName());
         if (val == null) return false;
@@ -355,7 +353,7 @@ public class RouteService {
      * <p>每个禁飞区条目自成一个 zone（zoneId = 其 gridId）。
      * 如果未来需要多格合成一个大 zone，可给 Grid 加 groupId 字段。</p>
      */
-    private NoFlyData buildNoFlyData(List<Grid> noFlyZones, GridIndex index) {
+    private NoFlyData buildNoFlyData(List<EncryptedGrid> noFlyZones, GridIndex index, GridContext ctx) {
         Map<String, Set<String>> zoneGridMap = new LinkedHashMap<>();
         Map<String, Set<String>> gridZoneMap = new HashMap<>();
 
@@ -365,9 +363,9 @@ public class RouteService {
 
         // 先建全量网格 ID 集合，用于精确匹配
         Set<String> fullGridIds = index.gridMap.values().stream()
-                .map(Grid::getId).collect(Collectors.toSet());
+                .map(EncryptedGrid::getId).collect(Collectors.toSet());
 
-        for (Grid nfz : noFlyZones) {
+        for (EncryptedGrid nfz : noFlyZones) {
             String matchedGridId = null;
 
             // 1. 精确 ID 匹配
@@ -375,7 +373,7 @@ public class RouteService {
                 matchedGridId = nfz.getId();
             } else {
                 // 2. 坐标兜底：O(1) 索引反算（替代 O(n) 遍历）
-                Grid matched = findGridByIndex(nfz.getCenterPoint(), index);
+                EncryptedGrid matched = findGridByIndex(nfz.centerPoint(ctx), index, ctx);
                 if (matched != null) matchedGridId = matched.getId();
             }
 
@@ -391,12 +389,12 @@ public class RouteService {
      * 找出所有必经点所在的禁飞区网格 ID → 标记为可通行。
      * <p>必经点的经纬度落在哪个禁飞区网格内，那个网格就放行。</p>
      */
-    private Set<String> findPassableZones(List<GeoPoint> waypoints, List<Grid> noFlyZones, GridIndex index) {
+    private Set<String> findPassableZones(List<GeoPoint> waypoints, List<EncryptedGrid> noFlyZones, GridIndex index, GridContext ctx) {
         Set<String> passable = new HashSet<>();
         if (noFlyZones == null) return passable;
         for (GeoPoint wp : waypoints) {
-            for (Grid nfz : noFlyZones) {
-                if (isPointInGrid(nfz, wp, index)) {
+            for (EncryptedGrid nfz : noFlyZones) {
+                if (isPointInGrid(nfz, wp, index, ctx)) {
                     passable.add(nfz.getId());
                     break;
                 }
@@ -424,24 +422,24 @@ public class RouteService {
      * <h3>复杂度</h3>
      * O(K)，K = 封锁区内网格数。一次性预计算，不进入 A* 循环。
      */
-    private Set<String> computeExemptRegion(List<Grid> waypointGrids, GridIndex index,
-                                             NoFlyData noFlyData, Set<String> passableZones) {
+    private Set<String> computeExemptRegion(List<EncryptedGrid> waypointGrids, GridIndex index,
+                                             NoFlyData noFlyData, Set<String> passableZones, List<String> factorNames) {
         Set<String> exempt = new LinkedHashSet<>();
-        Queue<Grid> queue = new LinkedList<>();
+        Queue<EncryptedGrid> queue = new LinkedList<>();
 
         // 必经点永远豁免；入队条件：自身被封锁 或 被封锁邻居包围（防止孤立）
-        for (Grid wp : waypointGrids) {
+        for (EncryptedGrid wp : waypointGrids) {
             exempt.add(wp.getId());
-            if (isGridBlocked(wp, noFlyData, passableZones)) {
+            if (isGridBlocked(wp, noFlyData, passableZones, factorNames)) {
                 queue.add(wp);
             } else {
                 // 虽然自身解锁了，但如果有任何邻居被封锁 → 仍需扩散
                 for (int[] dir : NEIGHBOR_DIRECTIONS) {
-                    Grid nb = index.gridMap.get(indexKey(
+                    EncryptedGrid nb = index.gridMap.get(indexKey(
                             wp.getIndexLon() + dir[0],
                             wp.getIndexLat() + dir[1],
                             wp.getIndexAlt() + dir[2]));
-                    if (nb != null && isGridBlocked(nb, noFlyData, passableZones)) {
+                    if (nb != null && isGridBlocked(nb, noFlyData, passableZones, factorNames)) {
                         queue.add(wp);
                         break;
                     }
@@ -450,19 +448,19 @@ public class RouteService {
         }
 
         while (!queue.isEmpty()) {
-            Grid current = queue.poll();
+            EncryptedGrid current = queue.poll();
             // 检查 6 个面方向
             for (int[] dir : NEIGHBOR_DIRECTIONS) {
                 int ni = current.getIndexLon() + dir[0];
                 int nj = current.getIndexLat() + dir[1];
                 int nk = current.getIndexAlt() + dir[2];
-                Grid neighbor = index.gridMap.get(indexKey(ni, nj, nk));
+                EncryptedGrid neighbor = index.gridMap.get(indexKey(ni, nj, nk));
 
                 if (neighbor == null || exempt.contains(neighbor.getId())) continue;
 
                 // 只有被封锁的网格才纳入豁免扩散
                 // "被封锁" = 禁飞区未放行 OR 因素=0
-                if (isGridBlocked(neighbor, noFlyData, passableZones)) {
+                if (isGridBlocked(neighbor, noFlyData, passableZones, factorNames)) {
                     exempt.add(neighbor.getId());
                     queue.add(neighbor);
                 }
@@ -485,7 +483,7 @@ public class RouteService {
      * 因为 BFS 扩散时必经点本身已入队，邻居如果被封锁则纳入豁免扩散；
      * 必经点豁免检查在调用方 {@link #isGridPassable} 中处理。
      */
-    private boolean isGridBlocked(Grid g, NoFlyData noFlyData, Set<String> passableZones) {
+    private boolean isGridBlocked(EncryptedGrid g, NoFlyData noFlyData, Set<String> passableZones, List<String> factorNames) {
         // 禁飞区检查：属于某个未放行的禁飞区 → 封锁
         Set<String> zones = noFlyData.gridZoneMap.get(g.getId());
         if (zones != null && !zones.isEmpty()) {
@@ -496,7 +494,7 @@ public class RouteService {
             if (!inPassable) return true;
         }
         // 因素检查：任一因素=0 → 封锁
-        return !hasAllFactorsPassable(g);
+        return !hasAllFactorsPassable(g, factorNames);
     }
 
     // ======================================================================
@@ -514,8 +512,8 @@ public class RouteService {
      *   <li>否则 → ✅ 放行</li>
      * </ol>
      */
-    private boolean isGridPassable(Grid g, NoFlyData noFlyData, Set<String> passableZones,
-                                    Set<String> exemptGridIds) {
+    private boolean isGridPassable(EncryptedGrid g, NoFlyData noFlyData, Set<String> passableZones,
+                                    Set<String> exemptGridIds, List<String> factorNames) {
         // 豁免集最高优先级
         if (exemptGridIds.contains(g.getId())) return true;
 
@@ -530,12 +528,12 @@ public class RouteService {
         }
 
         // 因素检查
-        return hasAllFactorsPassable(g);
+        return hasAllFactorsPassable(g, factorNames);
     }
 
     /** @return true 如果网格所有因素值都 > 0 */
-    private boolean hasAllFactorsPassable(Grid g) {
-        Map<String, Integer> factors = g.getFactors();
+    private boolean hasAllFactorsPassable(EncryptedGrid g, List<String> factorNames) {
+        Map<String, Integer> factors = g.factors(factorNames);
         if (factors == null || factors.isEmpty()) return true;
         for (int val : factors.values()) {
             if (val == 0) return false;
@@ -552,8 +550,8 @@ public class RouteService {
      * <pre>score = Σ(factorValue × weight) / Σ(weight)</pre>
      * 无因素或无权重 → 默认 9（满分，不产生惩罚）。
      */
-    private double computeGridScore(Grid g, Map<String, Double> weights) {
-        Map<String, Integer> factors = g.getFactors();
+    private double computeGridScore(EncryptedGrid g, Map<String, Double> weights, List<String> factorNames) {
+        Map<String, Integer> factors = g.factors(factorNames);
         if (factors == null || factors.isEmpty() || weights == null || weights.isEmpty()) return 9.0;
         double weightedSum = 0, weightSum = 0;
         for (Map.Entry<String, Double> w : weights.entrySet()) {
@@ -571,15 +569,15 @@ public class RouteService {
      * <pre>penalty = (9 - score) / 9 × penaltyFactor</pre>
      * 满分 9 → 0m | 5 分 → 89m | 0 分 → 200m（默认）。
      */
-    private double scorePenalty(Grid g, Map<String, Double> weights, double penaltyFactor) {
-        return (9.0 - computeGridScore(g, weights)) / 9.0 * penaltyFactor;
+    private double scorePenalty(EncryptedGrid g, Map<String, Double> weights, double penaltyFactor, List<String> factorNames) {
+        return (9.0 - computeGridScore(g, weights, factorNames)) / 9.0 * penaltyFactor;
     }
 
     /** 路径所有网格平均评分 */
-    private double computeAvgScore(List<Grid> path, Map<String, Double> weights) {
+    private double computeAvgScore(List<EncryptedGrid> path, Map<String, Double> weights, List<String> factorNames) {
         if (path == null || path.isEmpty()) return 0;
         double sum = 0;
-        for (Grid g : path) sum += computeGridScore(g, weights);
+        for (EncryptedGrid g : path) sum += computeGridScore(g, weights, factorNames);
         return sum / path.size();
     }
 
@@ -606,39 +604,27 @@ public class RouteService {
      *   <li>存入 HashMap：key="i_j_k" → Grid（O(1) 查找）</li>
      * </ol>
      */
-    private GridIndex buildGridIndex(List<Grid> grids) {
+    private GridIndex buildGridIndex(List<EncryptedGrid> grids, GridContext ctx, List<String> factorNames) {
         // 从网格真实数据计算实际步长（兼容测试和实际数据）
-        double sumCenterLat = 0;
-        double minCenterLon = Double.MAX_VALUE, minCenterLat = Double.MAX_VALUE, minCenterAlt = Double.MAX_VALUE;
-        double maxCenterLon = -Double.MAX_VALUE, maxCenterLat = -Double.MAX_VALUE;
+        double minCenterLon = ctx.minLon;
+        double minCenterLat = ctx.minLat;
+        double minCenterAlt = ctx.minAlt;;
+            // anchors taken from ctx
 
-        for (Grid g : grids) {
-            sumCenterLat += g.getCenterPoint().getLatitude();
-            double cl = g.getCenterPoint().getLongitude();
-            double ct = g.getCenterPoint().getLatitude();
-            double ca = g.getCenterPoint().getAltitude();
-            if (cl < minCenterLon) minCenterLon = cl;
-            if (ct < minCenterLat) minCenterLat = ct;
-            if (ca < minCenterAlt) minCenterAlt = ca;
-            if (cl > maxCenterLon) maxCenterLon = cl;
-            if (ct > maxCenterLat) maxCenterLat = ct;
-        }
-
-        int n = grids.size();
-        double avgCenterLat = sumCenterLat / n;
+        double avgCenterLat = (ctx.minLat + ctx.minLat) / 2;
         double metersPerDegLon = METERS_PER_DEGREE_LAT * Math.cos(Math.toRadians(avgCenterLat));
 
         // 唯一经/纬度数（3D 网格不受高度层数干扰）
         Set<Double> ul = new HashSet<>(), ut = new HashSet<>();
-        for (Grid g : grids) {
-            ul.add(g.getCenterPoint().getLongitude());
-            ut.add(g.getCenterPoint().getLatitude());
+        for (EncryptedGrid g : grids) {
+            ul.add(g.centerPoint(ctx).getLongitude());
+            ut.add(g.centerPoint(ctx).getLatitude());
         }
         int cols = ul.size(), rows = ut.size();
 
-        double cellLonDeg = cols > 1 ? (maxCenterLon - minCenterLon) / (cols - 1) : 0.001;
-        double cellLatDeg = rows > 1 ? (maxCenterLat - minCenterLat) / (rows - 1) : 0.001;
-        double cellAlt = routeConfig.getGridSizeMeters();
+        double cellLonDeg = ctx.cellLon;
+        double cellLatDeg = ctx.cellLat;
+        double cellAlt = ctx.cellAlt;
 
         // 防止除零
         if (cellLonDeg < 1e-12) cellLonDeg = 0.001;
@@ -649,19 +635,13 @@ public class RouteService {
         double halfLatDeg = cellLatDeg / 2;
         double halfAlt = cellAlt / 2;
 
-        // 以最小中心点为锚点 (0,0,0)，EPS 留足够余量消除浮点累计误差
-        final double EPS = 1e-8;
-        Map<String, Grid> indexMap = new HashMap<>();
-        for (Grid g : grids) {
-            int iLon = (int) Math.round((g.getCenterPoint().getLongitude() - minCenterLon) / cellLonDeg + EPS);
-            int iLat = (int) Math.round((g.getCenterPoint().getLatitude() - minCenterLat) / cellLatDeg + EPS);
-            int iAlt = (int) Math.round((g.getCenterPoint().getAltitude() - minCenterAlt) / cellAlt + EPS);
-            g.setIndexLon(iLon);
-            g.setIndexLat(iLat);
-            g.setIndexAlt(iAlt);
-            indexMap.put(indexKey(iLon, iLat, iAlt), g);
+        Map<String, EncryptedGrid> indexMap = new HashMap<>();
+        for (EncryptedGrid g : grids) {
+            // i/j/k 已在构造时编码进 bits，直接取用
+            indexMap.put(indexKey(g.i(), g.j(), g.k()), g);
         }
 
+        for (EncryptedGrid eg : grids) eg.seal(factorNames);
         return new GridIndex(indexMap, cellLonDeg, cellLatDeg, cellAlt,
                 halfLonDeg, halfLatDeg, halfAlt, metersPerDegLon,
                 minCenterLon, minCenterLat, minCenterAlt);
@@ -684,30 +664,30 @@ public class RouteService {
      * </ol>
      * @return 找到的网格，或 null（坐标完全不在任何网格范围内）
      */
-    private Grid findGridByPoint(List<Grid> grids, GeoPoint point, GridIndex index) {
-        final double EPS = 1e-8;
+    private EncryptedGrid findGridByPoint(List<EncryptedGrid> grids, GeoPoint point, GridIndex index, GridContext ctx) {
+        final double EPS = routeConfig.getEps();
         // 1. O(1) 索引反算
         int iLon = (int) Math.round((point.getLongitude() - index.anchorLon) / index.cellLonDeg + EPS);
         int iLat = (int) Math.round((point.getLatitude() - index.anchorLat) / index.cellLatDeg + EPS);
         int iAlt = (int) Math.round((point.getAltitude() - index.anchorAlt) / index.cellAlt + EPS);
 
-        Grid g = index.gridMap.get(indexKey(iLon, iLat, iAlt));
-        if (g != null && isPointInGrid(g, point, index)) return g;
+        EncryptedGrid g = index.gridMap.get(indexKey(iLon, iLat, iAlt));
+        if (g != null && isPointInGrid(g, point, index, ctx)) return g;
 
         // 2. 兜底：搜索 6 面邻居（处理浮点舍入边界）
         for (int[] dir : NEIGHBOR_DIRECTIONS) {
             g = index.gridMap.get(indexKey(iLon + dir[0], iLat + dir[1], iAlt + dir[2]));
-            if (g != null && isPointInGrid(g, point, index)) return g;
+            if (g != null && isPointInGrid(g, point, index, ctx)) return g;
         }
 
         // 3. 极端兜底：遍历最近中心点（坐标完全不在网格空间内）
-        Grid nearest = null;
+        EncryptedGrid nearest = null;
         double minDist = Double.MAX_VALUE;
-        for (Grid grid : grids) {
-            double dist = grid.getCenterPoint().distanceTo(point);
+        for (EncryptedGrid grid : grids) {
+            double dist = grid.centerPoint(ctx).distanceTo(point);
             if (dist < minDist) { minDist = dist; nearest = grid; }
         }
-        if (nearest != null && isPointInGrid(nearest, point, index)) return nearest;
+        if (nearest != null && isPointInGrid(nearest, point, index, ctx)) return nearest;
         return null;
     }
 
@@ -715,19 +695,19 @@ public class RouteService {
      * 纯索引反算（O(1)）：根据坐标直接用锚点+步长反算索引 → HashMap 查找。
      * 不含 O(n) 兜底，用于禁飞区坐标匹配等场景（不需要 grids 列表）。
      */
-    private Grid findGridByIndex(GeoPoint point, GridIndex index) {
-        final double EPS = 1e-8;
+    private EncryptedGrid findGridByIndex(GeoPoint point, GridIndex index, GridContext ctx) {
+        final double EPS = routeConfig.getEps();
         int iLon = (int) Math.round((point.getLongitude() - index.anchorLon) / index.cellLonDeg + EPS);
         int iLat = (int) Math.round((point.getLatitude() - index.anchorLat) / index.cellLatDeg + EPS);
         int iAlt = (int) Math.round((point.getAltitude() - index.anchorAlt) / index.cellAlt + EPS);
 
-        Grid g = index.gridMap.get(indexKey(iLon, iLat, iAlt));
-        if (g != null && isPointInGrid(g, point, index)) return g;
+        EncryptedGrid g = index.gridMap.get(indexKey(iLon, iLat, iAlt));
+        if (g != null && isPointInGrid(g, point, index, ctx)) return g;
 
         // 兜底：搜索 6 面邻居（处理浮点舍入边界）
         for (int[] dir : NEIGHBOR_DIRECTIONS) {
             g = index.gridMap.get(indexKey(iLon + dir[0], iLat + dir[1], iAlt + dir[2]));
-            if (g != null && isPointInGrid(g, point, index)) return g;
+            if (g != null && isPointInGrid(g, point, index, ctx)) return g;
         }
         return null;
     }
@@ -735,8 +715,8 @@ public class RouteService {
     /**
      * 判断点是否在网格包围盒内（中心点 ± 半格尺寸）
      */
-    private boolean isPointInGrid(Grid grid, GeoPoint point, GridIndex index) {
-        GeoPoint c = grid.getCenterPoint();
+    private boolean isPointInGrid(EncryptedGrid grid, GeoPoint point, GridIndex index, GridContext ctx) {
+        GeoPoint c = grid.centerPoint(ctx);
         return point.getLongitude() >= c.getLongitude() - index.halfLonDeg
                 && point.getLongitude() <= c.getLongitude() + index.halfLonDeg
                 && point.getLatitude() >= c.getLatitude() - index.halfLatDeg
@@ -777,14 +757,13 @@ public class RouteService {
      * @param penaltyFactor 评分惩罚因子
      * @return 最短路径（网格列表），找不到返回 null
      */
-    private List<Grid> aStarSearch(GridIndex index, Grid start, Grid end,
+    private List<EncryptedGrid> aStarSearch(GridIndex index, EncryptedGrid start, EncryptedGrid end,
                                     double minAltitude, double maxAltitude,
                                     NoFlyData noFlyData, Set<String> passableZones,
                                     Set<String> exemptGridIds,
-                                    Map<String, Double> factorWeights,
-                                    double penaltyFactor,
-                                    Set<String> ruleMatchIds) {
-        Map<String, Grid> gridMap = index.gridMap;
+                                    Map<String, Double> factorWeights, double penaltyFactor,
+                                    Set<String> ruleMatchIds, GridContext ctx, List<String> factorNames) {
+        Map<String, EncryptedGrid> gridMap = index.gridMap;
 
         // openSet: 待探索节点，按 fScore 排序（最小优先）
         PriorityQueue<Node> openSet = new PriorityQueue<>(Comparator.comparingDouble(n -> n.fScore));
@@ -792,7 +771,7 @@ public class RouteService {
         Map<String, Double> bestG = new HashMap<>();
 
         // 起点入队（g=0, h=到终点距离）
-        Node startNode = new Node(start, 0, heuristicMeters(start, end, index), null);
+        Node startNode = new Node(start, 0, heuristicMeters(start, end, index, ctx), null);
         openSet.add(startNode);
         bestG.put(gridKey(start), 0.0);
 
@@ -820,23 +799,23 @@ public class RouteService {
                 int ni = current.grid.getIndexLon() + dir[0];
                 int nj = current.grid.getIndexLat() + dir[1];
                 int nk = current.grid.getIndexAlt() + dir[2];
-                Grid neighbor = gridMap.get(indexKey(ni, nj, nk));
+                EncryptedGrid neighbor = gridMap.get(indexKey(ni, nj, nk));
 
                 // 不存在 → 跳过
                 if (neighbor == null) continue;
                 // 高度不在走廊范围且不在豁免集 → 跳过
-                double alt = neighbor.getCenterPoint().getAltitude();
+                double alt = neighbor.centerPoint(ctx).getAltitude();
                 if (!exemptGridIds.contains(neighbor.getId())
                         && (alt < minAltitude || alt > maxAltitude)) continue;
                 // 禁飞区/因素 → 跳过
-                if (!isGridPassable(neighbor, noFlyData, passableZones, exemptGridIds)) continue;
+                if (!isGridPassable(neighbor, noFlyData, passableZones, exemptGridIds, factorNames)) continue;
 
                 String neighborKey = gridKey(neighbor);
                 if (closedSet.contains(neighborKey)) continue;
 
                 // 移动代价 = 实际距离 + 评分惩罚
-                double baseDist = distanceMeters(current.grid.getCenterPoint(), neighbor.getCenterPoint(), index);
-                double penalty = scorePenalty(neighbor, factorWeights, penaltyFactor);
+                double baseDist = distanceMeters(current.grid.centerPoint(ctx), neighbor.centerPoint(ctx), index);
+                double penalty = scorePenalty(neighbor, factorWeights, penaltyFactor, factorNames);
                 double moveCost = baseDist + penalty;
                 // 规则代价：匹配格折扣，不匹配格加倍（用乘数避免负数）
                 if (!ruleMatchIds.isEmpty()) {
@@ -851,7 +830,7 @@ public class RouteService {
 
                 // 记录最优 gScore，创建新节点直接入队（无需 remove 旧节点）
                 bestG.put(neighborKey, tentativeG);
-                double h = heuristicMeters(neighbor, end, index);
+                double h = heuristicMeters(neighbor, end, index, ctx);
                 Node neighborNode = new Node(neighbor, tentativeG, tentativeG + h, current);
                 openSet.add(neighborNode);
 
@@ -862,8 +841,8 @@ public class RouteService {
     }
 
     /** 启发函数：纯欧几里得距离（不含评分惩罚，保证可采纳） */
-    private double heuristicMeters(Grid a, Grid b, GridIndex index) {
-        return distanceMeters(a.getCenterPoint(), b.getCenterPoint(), index);
+    private double heuristicMeters(EncryptedGrid a, EncryptedGrid b, GridIndex index, GridContext ctx) {
+        return distanceMeters(a.centerPoint(ctx), b.centerPoint(ctx), index);
     }
 
     /**
@@ -882,8 +861,8 @@ public class RouteService {
     }
 
     /** 从目标节点沿 parent 链回溯出完整路径 */
-    private List<Grid> reconstructPath(Node node) {
-        LinkedList<Grid> path = new LinkedList<>();
+    private List<EncryptedGrid> reconstructPath(Node node) {
+        LinkedList<EncryptedGrid> path = new LinkedList<>();
         while (node != null) {
             path.addFirst(node.grid);
             node = node.parent;
@@ -899,10 +878,10 @@ public class RouteService {
      * 合并多段 A* 结果，交界处去重。
      * <p>seg[0]=[A,B,C], seg[1]=[C,D,E] → [A,B,C,D,E]</p>
      */
-    private List<Grid> mergeSegments(List<List<Grid>> segments) {
-        List<Grid> result = new ArrayList<>(segments.get(0));
+    private List<EncryptedGrid> mergeSegments(List<List<EncryptedGrid>> segments) {
+        List<EncryptedGrid> result = new ArrayList<>(segments.get(0));
         for (int s = 1; s < segments.size(); s++) {
-            List<Grid> seg = segments.get(s);
+            List<EncryptedGrid> seg = segments.get(s);
             for (int i = 1; i < seg.size(); i++) result.add(seg.get(i));
         }
         return result;
@@ -912,25 +891,25 @@ public class RouteService {
      * 走廊扩展：以核心路径每个网格为中心，向经纬度方向扩展 {@code routeWidth} 格宽度。
      * 同样遵循禁飞区和因素检查。
      */
-    private List<Grid> expandCorridor(GridIndex index, List<Grid> corePath,
+    private List<EncryptedGrid> expandCorridor(GridIndex index, List<EncryptedGrid> corePath,
                                        int routeWidth, double minAlt, double maxAlt,
                                        NoFlyData noFlyData, Set<String> passableZones,
-                                       Set<String> exemptGridIds) {
+                                       Set<String> exemptGridIds, List<String> factorNames, GridContext ctx) {
         Set<String> corridorKeys = new HashSet<>();
-        List<Grid> corridor = new ArrayList<>();
-        Map<String, Grid> gridMap = index.gridMap;
+        List<EncryptedGrid> corridor = new ArrayList<>();
+        Map<String, EncryptedGrid> gridMap = index.gridMap;
         int halfWidth = (routeWidth - 1) / 2;
 
-        for (Grid g : corePath) {
+        for (EncryptedGrid g : corePath) {
             for (int di = -halfWidth; di <= halfWidth; di++) {
                 for (int dj = -halfWidth; dj <= halfWidth; dj++) {
                     int ni = g.getIndexLon() + di;
                     int nj = g.getIndexLat() + dj;
-                    Grid neighbor = gridMap.get(indexKey(ni, nj, g.getIndexAlt()));
-                    double alt = neighbor.getCenterPoint().getAltitude();
+                    EncryptedGrid neighbor = gridMap.get(indexKey(ni, nj, g.getIndexAlt()));
+                    double alt = neighbor.centerPoint(ctx).getAltitude();
                     if (neighbor != null
                             && alt >= minAlt && alt <= maxAlt
-                            && isGridPassable(neighbor, noFlyData, passableZones, exemptGridIds)
+                            && isGridPassable(neighbor, noFlyData, passableZones, exemptGridIds, factorNames)
                             && corridorKeys.add(gridKey(neighbor))) {
                         corridor.add(neighbor);
                     }
@@ -952,8 +931,8 @@ public class RouteService {
         return dist;
     }
 
-    private String gridKey(Grid g) {
-        return g.getId();
+    private String gridKey(EncryptedGrid g) {
+        return Long.toHexString(g.getCompressed());
     }
 
     private RouteResult fail(String msg) {
@@ -966,11 +945,11 @@ public class RouteService {
 
     /** A* 搜索节点 */
     private static class Node {
-        Grid grid;           // 所在网格
+        EncryptedGrid grid;           // 所在网格
         double gScore;       // 起点到当前的累积代价（距离+评分惩罚）
         double fScore;       // gScore + heuristic（用于优先队列排序）
         Node parent;         // 父节点（用于回溯路径）
-        Node(Grid grid, double gScore, double fScore, Node parent) {
+        Node(EncryptedGrid grid, double gScore, double fScore, Node parent) {
             this.grid = grid; this.gScore = gScore; this.fScore = fScore; this.parent = parent;
         }
     }
@@ -986,12 +965,12 @@ public class RouteService {
      * </ul>
      */
     private static class GridIndex {
-        Map<String, Grid> gridMap;
+        Map<String, EncryptedGrid> gridMap;
         double cellLonDeg, cellLatDeg, cellAlt;
         double halfLonDeg, halfLatDeg, halfAlt;
         double metersPerDegLon;
         double anchorLon, anchorLat, anchorAlt;
-        GridIndex(Map<String, Grid> gridMap, double cellLonDeg, double cellLatDeg, double cellAlt,
+        GridIndex(Map<String, EncryptedGrid> gridMap, double cellLonDeg, double cellLatDeg, double cellAlt,
                   double halfLonDeg, double halfLatDeg, double halfAlt, double metersPerDegLon,
                   double anchorLon, double anchorLat, double anchorAlt) {
             this.gridMap = gridMap;

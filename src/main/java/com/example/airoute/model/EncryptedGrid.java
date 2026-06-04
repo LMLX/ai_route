@@ -94,6 +94,7 @@ public class EncryptedGrid {
 
     // ====== 核心方法 ======
 
+    @JsonIgnore
     public long getCompressed() { return bits; }
 
     @JsonIgnore
@@ -105,9 +106,9 @@ public class EncryptedGrid {
     @JsonIgnore
     public GeoPoint centerPoint(GridContext ctx) {
         GeoPoint p = new GeoPoint();
-        p.setLongitude(ctx.minLon + i() * ctx.cellLon + ctx.cellLon / 2);
-        p.setLatitude(ctx.minLat + j() * ctx.cellLat + ctx.cellLat / 2);
-        p.setAltitude(ctx.minAlt + k() * ctx.cellAlt + ctx.cellAlt / 2);
+        p.setLongitude(ctx.minLon + i() * ctx.cellLon);
+        p.setLatitude(ctx.minLat + j() * ctx.cellLat);
+        p.setAltitude(ctx.minAlt + k() * ctx.cellAlt);
         return p;
     }
 

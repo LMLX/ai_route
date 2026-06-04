@@ -448,7 +448,7 @@ async function runRoute() {
         let data = await resp.json();
         if (data.success && data.pathGrids) {
             $('result').innerHTML = `<div class="success">✅ ${data.message}</div>`;
-            drawRoute(data.pathGrids);
+            drawRoute(data.waypoints);
         } else {
             $('result').innerHTML = `<div class="fail">❌ ${data.message || '失败'}</div>`;
         }
@@ -457,18 +457,19 @@ async function runRoute() {
     }
 }
 
-function drawRoute(path) {
+function drawRoute(waypoints) {
     draw();
-    if (!path || path.length < 2) return;
+    if (!waypoints || waypoints.length < 2) return;
     let cx = ctx();
     cx.strokeStyle = '#3b82f6';
     cx.lineWidth = Math.max(2, 3 * scale);
     cx.lineCap = 'round';
     cx.lineJoin = 'round';
     cx.beginPath();
-    path.forEach((g, i) => {
-        let m = g.id.match(/g_(\d+)_(\d+)_(\d+)/); if (!m) return;
-        let xi = +m[1], yi = +m[2], zi = +m[3];
+    waypoints.forEach((wp, i) => {
+        let xi = Math.round((wp.longitude - 119.0005) / 0.001);
+        let yi = Math.round((wp.latitude  - 29.0005) / 0.001);
+        let zi = Math.round((wp.altitude  - 50) / 100);
         let px = isoX(xi, yi, zi), py = isoY(xi, yi, zi);
         if (i === 0) cx.moveTo(px, py);
         else cx.lineTo(px, py);

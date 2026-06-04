@@ -26,4 +26,7 @@ public class RouteConfig {
 
     /** 网格边长（米），默认 100m。影响线宽换算和高度步长 */
     private double gridSizeMeters = 100.0;
+
+    /** 浮点舍入保护 epsilon，避免边界值舍入错误 */
+    private double eps = 1e-8;
 }
