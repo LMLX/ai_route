@@ -4,6 +4,7 @@ import com.example.airoute.config.RouteConfig;
 import com.example.airoute.dto.RouteResult;
 import com.example.airoute.dto.RouteRule;
 import com.example.airoute.model.EncryptedGrid;
+import com.example.airoute.model.Grid;
 import com.example.airoute.model.GridContext;
 import com.example.airoute.model.GeoPoint;
 import org.springframework.stereotype.Service;
@@ -97,6 +98,18 @@ public class RouteService {
         // ===== 0. 前置校验 =====
         if (grids == null || grids.isEmpty()) {
             return fail("网格数据为空");
+        }
+
+
+
+
+
+        List<Grid> heatGridList = new ArrayList<>();
+        for (Grid grid : heatGridList) {
+            double longitude = grid.getCenterPoint().getLongitude();
+            double latitude = grid.getCenterPoint().getLatitude();
+            double altitude = grid.getCenterPoint().getAltitude();
+            //如何找到grids中对应的EncryptedGrid
         }
 
         int widthInGrids = Math.max(1, (int) Math.ceil(routeWidth / routeConfig.getGridSizeMeters()));

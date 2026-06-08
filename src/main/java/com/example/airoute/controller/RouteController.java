@@ -119,7 +119,7 @@ public class RouteController {
         List<String> factorNames = new ArrayList<>();
         if (rules != null) for (var r : rules) if (!factorNames.contains(r.getFactorName())) factorNames.add(r.getFactorName());
 
-        String inputPath = "/Users/jinjiahao/IdeaProjects/ai-route/dim_grid_data2";
+        String inputPath = "/Users/jinjiahao/IdeaProjects/ai-route/dim_grid_data_100*100*100";
         final double CELL_LON = 0.001, CELL_LAT = 0.001, CELL_ALT = 100;
         final double eps = routeConfig.getEps();
 
